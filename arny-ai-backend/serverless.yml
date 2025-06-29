@@ -1,0 +1,229 @@
+service: arny-ai-backend
+
+frameworkVersion: '4'
+
+provider:
+  name: aws
+  runtime: python3.11
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  timeout: 29
+  memorySize: 512
+  
+  environment:
+    STAGE: ${self:provider.stage}
+    OPENAI_API_KEY: ${env:OPENAI_API_KEY}
+    SUPABASE_URL: ${env:SUPABASE_URL}
+    SUPABASE_ANON_KEY: ${env:SUPABASE_ANON_KEY}
+    SUPABASE_SERVICE_ROLE_KEY: ${env:SUPABASE_SERVICE_ROLE_KEY}
+    AMADEUS_API_KEY: ${env:AMADEUS_API_KEY}
+    AMADEUS_API_SECRET: ${env:AMADEUS_API_SECRET}
+    AMADEUS_BASE_URL: ${env:AMADEUS_BASE_URL, 'test.api.amadeus.com'}
+    GOOGLE_CLIENT_ID: ${env:GOOGLE_CLIENT_ID}
+    GOOGLE_CLIENT_SECRET: ${env:GOOGLE_CLIENT_SECRET}
+    GOOGLE_REDIRECT_URI: ${env:GOOGLE_REDIRECT_URI}
+    OUTLOOK_CLIENT_ID: ${env:OUTLOOK_CLIENT_ID}
+    OUTLOOK_CLIENT_SECRET: ${env:OUTLOOK_CLIENT_SECRET}
+    OUTLOOK_REDIRECT_URI: ${env:OUTLOOK_REDIRECT_URI}
+  
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource: '*'
+
+plugins:
+  - serverless-python-requirements
+
+custom:
+  pythonRequirements:
+    dockerizePip: false
+    layer: true
+
+functions:
+  # Authentication functions
+  auth:
+    handler: src/main.lambda_handler
+    layers:
+      - { Ref: PythonRequirementsLambdaLayer }
+    events:
+      - http:
+          path: /auth/signup
+          method: post
+          cors: true
+      - http:
+          path: /auth/signin
+          method: post
+          cors: true
+      - http:
+          path: /auth/refresh
+          method: post
+          cors: true
+      - http:
+          path: /auth/signout
+          method: post
+          cors: true
+
+  # Onboarding functions
+  onboarding:
+    handler: src/main.lambda_handler
+    layers:
+      - { Ref: PythonRequirementsLambdaLayer }
+    events:
+      - http:
+          path: /onboarding/chat
+          method: post
+          cors: true
+      - http:
+          path: /onboarding/group/check
+          method: post
+          cors: true
+      - http:
+          path: /onboarding/group/create
+          method: post
+          cors: true
+      - http:
+          path: /onboarding/group/join
+          method: post
+          cors: true
+
+  # Main travel chat functions
+  travel:
+    handler: src/main.lambda_handler
+    layers:
+      - { Ref: PythonRequirementsLambdaLayer }
+    events:
+      - http:
+          path: /chat
+          method: post
+          cors: true
+      - http:
+          path: /travel/chat
+          method: post
+          cors: true
+
+  # User management functions
+  user:
+    handler: src/main.lambda_handler
+    layers:
+      - { Ref: PythonRequirementsLambdaLayer }
+    events:
+      - http:
+          path: /user/status
+          method: post
+          cors: true
+      - http:
+          path: /user/status
+          method: get
+          cors: true
+
+  # Health check function
+  health:
+    handler: src/main.lambda_handler
+    layers:
+      - { Ref: PythonRequirementsLambdaLayer }
+    events:
+      - http:
+          path: /health
+          method: get
+          cors: true
+
+# CloudFormation resources
+resources:
+  Resources:
+    # API Gateway configuration for custom domain (optional)
+    ApiGatewayRestApi:
+      Type: AWS::ApiGateway::RestApi
+      Properties:
+        Name: ${self:service}-${self:provider.stage}
+        Description: Arny AI Backend API
+        EndpointConfiguration:
+          Types:
+            - REGIONAL
+
+    # CloudWatch Log Groups
+    AuthLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-auth
+        RetentionInDays: 14
+
+    OnboardingLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-onboarding
+        RetentionInDays: 14
+
+    TravelLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-travel
+        RetentionInDays: 14
+
+    UserLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-user
+        RetentionInDays: 14
+
+    HealthLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-health
+        RetentionInDays: 14
+
+  Outputs:
+    ApiEndpoint:
+      Description: API Gateway endpoint URL
+      Value:
+        Fn::Join:
+          - ''
+          - - 'https://'
+            - Ref: ApiGatewayRestApi
+            - '.execute-api.'
+            - ${self:provider.region}
+            - '.amazonaws.com/'
+            - ${self:provider.stage}
+    
+    AuthEndpoint:
+      Description: Authentication endpoint
+      Value:
+        Fn::Join:
+          - ''
+          - - 'https://'
+            - Ref: ApiGatewayRestApi
+            - '.execute-api.'
+            - ${self:provider.region}
+            - '.amazonaws.com/'
+            - ${self:provider.stage}
+            - '/auth'
+    
+    OnboardingEndpoint:
+      Description: Onboarding endpoint
+      Value:
+        Fn::Join:
+          - ''
+          - - 'https://'
+            - Ref: ApiGatewayRestApi
+            - '.execute-api.'
+            - ${self:provider.region}
+            - '.amazonaws.com/'
+            - ${self:provider.stage}
+            - '/onboarding'
+    
+    TravelEndpoint:
+      Description: Travel chat endpoint
+      Value:
+        Fn::Join:
+          - ''
+          - - 'https://'
+            - Ref: ApiGatewayRestApi
+            - '.execute-api.'
+            - ${self:provider.region}
+            - '.amazonaws.com/'
+            - ${self:provider.stage}
+            - '/travel'
