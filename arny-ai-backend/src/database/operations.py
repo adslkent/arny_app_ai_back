@@ -1039,9 +1039,19 @@ class DatabaseOperations:
             
             # Get table counts (approximate)
             tables_status = {}
-            for table in ["user_profiles", "chat_messages", "group_members", "flight_searches", "hotel_searches"]:
+            table_configs = {
+                "user_profiles": "user_id",
+                "chat_messages": "id",
+                "group_members": "id",
+                "flight_searches": "search_id",
+                "hotel_searches": "id",
+                "onboarding_progress": "user_id",
+                "user_preferences": "user_id"
+            }
+
+            for table, primary_key in table_configs.items():
                 try:
-                    count_response = self.client.table(table).select("id", count="exact").limit(1).execute()
+                    count_response = self.client.table(table).select(primary_key, count="exact").limit(1).execute()
                     tables_status[table] = "healthy"
                 except Exception as e:
                     tables_status[table] = f"error: {str(e)}"
