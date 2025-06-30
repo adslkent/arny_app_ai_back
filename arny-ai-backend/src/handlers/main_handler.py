@@ -183,9 +183,34 @@ class MainHandler:
                     
                     await self.db.create_user_profile(user_profile)
                     
+                    # Convert datetime objects to strings for JSON serialization
+                    user_data = auth_result["user"].copy()
+                    if isinstance(user_data.get("created_at"), datetime):
+                        user_data["created_at"] = user_data["created_at"].isoformat()
+                    if user_data.get("updated_at"):
+                        if isinstance(user_data["updated_at"], datetime):
+                            user_data["updated_at"] = user_data["updated_at"].isoformat()
+                    if user_data.get("email_confirmed_at"):
+                        if isinstance(user_data["email_confirmed_at"], datetime):
+                            user_data["email_confirmed_at"] = user_data["email_confirmed_at"].isoformat()
+                    if user_data.get("last_sign_in_at"):
+                        if isinstance(user_data["last_sign_in_at"], datetime):
+                            user_data["last_sign_in_at"] = user_data["last_sign_in_at"].isoformat()
+                    
+                    session_data = auth_result["session"].copy()
+                    if isinstance(session_data.get("expires_at"), datetime):
+                        session_data["expires_at"] = session_data["expires_at"].isoformat()
+                    elif isinstance(session_data.get("expires_at"), (int, float)):
+                        # If it's already a timestamp, convert to ISO format
+                        try:
+                            session_data["expires_at"] = datetime.fromtimestamp(session_data["expires_at"]).isoformat()
+                        except (ValueError, TypeError):
+                            # If conversion fails, keep the original value
+                            pass
+                    
                     return self._success_response({
-                        'user': auth_result["user"],
-                        'session': auth_result["session"],
+                        'user': user_data,
+                        'session': session_data,
                         'message': 'User created successfully'
                     })
                 else:
@@ -201,9 +226,31 @@ class MainHandler:
                 auth_result = await self.auth.sign_in(email, password)
                 
                 if auth_result.get("success"):
+                    # Convert datetime objects to strings for JSON serialization
+                    user_data = auth_result["user"].copy()
+                    if isinstance(user_data.get("last_sign_in_at"), datetime):
+                        user_data["last_sign_in_at"] = user_data["last_sign_in_at"].isoformat()
+                    if user_data.get("email_confirmed_at"):
+                        if isinstance(user_data["email_confirmed_at"], datetime):
+                            user_data["email_confirmed_at"] = user_data["email_confirmed_at"].isoformat()
+                    if user_data.get("created_at"):
+                        if isinstance(user_data["created_at"], datetime):
+                            user_data["created_at"] = user_data["created_at"].isoformat()
+                    
+                    session_data = auth_result["session"].copy()
+                    if isinstance(session_data.get("expires_at"), datetime):
+                        session_data["expires_at"] = session_data["expires_at"].isoformat()
+                    elif isinstance(session_data.get("expires_at"), (int, float)):
+                        # If it's already a timestamp, convert to ISO format
+                        try:
+                            session_data["expires_at"] = datetime.fromtimestamp(session_data["expires_at"]).isoformat()
+                        except (ValueError, TypeError):
+                            # If conversion fails, keep the original value
+                            pass
+                    
                     return self._success_response({
-                        'user': auth_result["user"],
-                        'session': auth_result["session"],
+                        'user': user_data,
+                        'session': session_data,
                         'message': 'Signed in successfully'
                     })
                 else:
@@ -218,10 +265,29 @@ class MainHandler:
                 auth_result = await self.auth.refresh_session(refresh_token)
                 
                 if auth_result.get("success"):
-                    return self._success_response({
-                        'session': auth_result["session"],
+                    # Convert datetime objects to strings for JSON serialization
+                    session_data = auth_result["session"].copy()
+                    if isinstance(session_data.get("expires_at"), datetime):
+                        session_data["expires_at"] = session_data["expires_at"].isoformat()
+                    elif isinstance(session_data.get("expires_at"), (int, float)):
+                        try:
+                            session_data["expires_at"] = datetime.fromtimestamp(session_data["expires_at"]).isoformat()
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    response_data = {
+                        'session': session_data,
                         'message': 'Session refreshed successfully'
-                    })
+                    }
+                    
+                    # Add user data if available
+                    if auth_result.get("user"):
+                        user_data = auth_result["user"].copy()
+                        if isinstance(user_data.get("email_confirmed_at"), datetime):
+                            user_data["email_confirmed_at"] = user_data["email_confirmed_at"].isoformat()
+                        response_data['user'] = user_data
+                    
+                    return self._success_response(response_data)
                 else:
                     return self._error_response(401, auth_result.get("error", "Token refresh failed"))
             
@@ -276,7 +342,18 @@ class MainHandler:
             return self._error_response(500, "Internal server error")
     
     def _success_response(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Return successful API response"""
+        """Return successful API response with proper JSON serialization"""
+        
+        def json_serializer(obj):
+            """JSON serializer for objects not serializable by default json code"""
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            elif hasattr(obj, 'dict'):  # Pydantic models
+                return obj.dict()
+            elif hasattr(obj, '__dict__'):  # Other objects
+                return obj.__dict__
+            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+        
         return {
             'statusCode': 200,
             'headers': {
@@ -289,7 +366,7 @@ class MainHandler:
                 'success': True,
                 'data': data,
                 'timestamp': datetime.utcnow().isoformat()
-            })
+            }, default=json_serializer)
         }
     
     def _error_response(self, status_code: int, error_message: str) -> Dict[str, Any]:
