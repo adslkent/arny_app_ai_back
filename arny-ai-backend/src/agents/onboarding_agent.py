@@ -4,6 +4,7 @@ import urllib.parse
 import requests
 import email.mime.text
 import re
+import asyncio
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 from enum import Enum
@@ -102,7 +103,7 @@ def send_group_invites_tool(email_addresses: str) -> dict:
 @function_tool
 def validate_group_code_tool(group_code: str) -> dict:
     """
-    Validate a group code
+    Validate a group code and check if it exists in the database
     """
     try:
         agent = _get_onboarding_agent()
@@ -118,56 +119,76 @@ def validate_group_code_tool(group_code: str) -> dict:
         is_valid = agent.group_generator.validate_group_code(formatted_code)
         
         if not is_valid:
-            return {"valid": False, "exists": False, "message": "Invalid group code format"}
+            return {"valid": False, "exists": False, "message": "Invalid group code format. Group codes should be 4-10 alphanumeric characters. Please check the group code and try again, or type 'skip' to skip group setup for now."}
         
-        # Check if group exists (would need database call)
-        # For now, simulate group existence check
-        group_exists = True  # This would be: await agent.db.check_group_exists(formatted_code)
+        # Check if group exists in database
+        group_exists = asyncio.run(agent.db.check_group_exists(formatted_code))
         
         if group_exists:
-            # Store group info
-            agent.current_collected_data["group_code"] = formatted_code
-            agent.current_collected_data["group_role"] = "member"
+            # Add user to existing group as member
+            success = asyncio.run(agent.db.add_group_member(formatted_code, agent.current_user_id, "member"))
             
-            return {
-                "valid": True,
-                "exists": True,
-                "group_code": formatted_code,
-                "message": f"Successfully joined group {formatted_code}"
-            }
+            if success:
+                # Store group info
+                agent.current_collected_data["group_code"] = formatted_code
+                agent.current_collected_data["group_role"] = "member"
+                
+                return {
+                    "valid": True,
+                    "exists": True,
+                    "group_code": formatted_code,
+                    "message": f"Successfully joined group {formatted_code}"
+                }
+            else:
+                return {
+                    "valid": True,
+                    "exists": True,
+                    "error": f"Failed to join group {formatted_code}. You may already be a member."
+                }
         else:
             return {
                 "valid": True,
                 "exists": False,
-                "message": "Group code format is valid but group does not exist"
+                "group_code": formatted_code,
+                "message": f"Group {formatted_code} does not exist. Please check the group code and try again, or type 'skip' to skip group setup for now."
             }
             
     except Exception as e:
         return {"valid": False, "error": str(e)}
 
 @function_tool
-def create_new_group_tool() -> dict:
+def skip_group_setup_tool() -> dict:
     """
-    Create a new group for the user
+    Skip group setup - automatically generate a random group code for the user (hidden from user)
     """
     try:
         agent = _get_onboarding_agent()
         if not agent:
             return {"success": False, "error": "Agent not available"}
         
-        # Generate unique group code
-        new_group_code = agent.group_generator.generate_group_code()
+        # Generate a unique random group code for this user
+        existing_codes = asyncio.run(agent.db.get_existing_group_codes())
+        new_group_code = agent.group_generator.generate_unique_group_code(existing_codes)
         
-        # Store group info
-        agent.current_collected_data["group_code"] = new_group_code
-        agent.current_collected_data["group_role"] = "admin"
+        # Create group in database with user as admin
+        success = asyncio.run(agent.db.add_group_member(new_group_code, agent.current_user_id, "admin"))
         
-        return {
-            "success": True,
-            "group_code": new_group_code,
-            "role": "admin",
-            "message": f"Created new group with code: {new_group_code}"
-        }
+        if success:
+            # Store that user skipped group setup but has a group code (hidden from user)
+            agent.current_collected_data["group_code"] = new_group_code
+            agent.current_collected_data["group_role"] = "admin"
+            agent.current_collected_data["group_skipped"] = True
+            
+            return {
+                "success": True,
+                "group_code": new_group_code,  # This is stored but not shown to user
+                "message": "Group setup skipped. You can always invite family or friends later."
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Failed to create personal group in database"
+            }
         
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -196,21 +217,35 @@ class OnboardingAgent:
             instructions=(
                 "You are Arny AI, a helpful onboarding assistant for a travel planner "
                 "personal assistant app. Your task is to obtain personal information from the "
-                "app user as part of the onboarding process. Follow these steps:\n"
-                "1. When the user provides a Group Code, use the validate_group_code_tool. If they say 'skip' or similar, use the create_new_group_tool.\n"
-                "2. Ask about the user's Gmail or Outlook address, then use the scan_email_for_profile_tool "
+                "app user as part of the onboarding process. Follow these steps:\n\n"
+                "1. GROUP CODE SETUP:\n"
+                "   - When the user provides a Group Code, use validate_group_code_tool to check if it exists.\n"
+                "   - If the group EXISTS: They will automatically join it as a member.\n"
+                "   - If the group DOES NOT EXIST: Tell them the group doesn't exist and ask them to check the group code and try again, or type 'skip' to skip group setup for now.\n"
+                "   - If they say 'skip', 'no', 'none', or 'later', use skip_group_setup_tool.\n\n"
+                "2. EMAIL SCANNING:\n"
+                "   Ask about the user's Gmail or Outlook address, then use scan_email_for_profile_tool "
                 "to fetch name, gender, birthdate, and city. If you successfully extract ANY information (even partial), "
                 "present what was found and ask the user to confirm or provide the missing details. "
                 "For example: 'I found your name is John Smith, but I couldn't find your gender, birthdate, or city. "
                 "Could you please provide these missing details?' Only if NO information is extracted at all should you "
-                "ask for all details manually.\n"
-                "3. Ask about the user's job details (specifically the user's employer, working schedule and holiday frequency). If any part is "
-                "missing, prompt until complete, then confirm.\n"
-                "4. Ask about the user's annual income and average monthly spending amount; repeat missing-item prompts until complete, then confirm.\n"
-                "5. Ask about the user's holiday preferences (specifically the user's preferences for holiday activities the user likes to do); repeat missing-item prompts until complete, then confirm.\n"
-                "6. Ask: 'Would you like to setup a group with people you know? This can always be done later.' If the user says yes, respond with 'Please invite users to your new group by providing their email addresses.' When they provide email addresses, respond with 'To confirm, I will be sending invites to {list all provided email addresses}. Are they correct?' If they confirm yes, use the send_group_invites_tool to send the invitation emails.\n"
-                "Finally ONLY when all the above onboarding process is completed, then respond: 'Thank you, this completes your onboarding to Arny!'\n"
-                "\n"
+                "ask for all details manually.\n\n"
+                "3. PERSONAL INFO:\n"
+                "   Collect: name, gender, birthdate, city. Ask for any missing details and confirm when complete.\n\n"
+                "4. JOB DETAILS:\n"
+                "   Ask about: employer, working schedule, holiday frequency. Prompt for missing items until complete, then confirm.\n\n"
+                "5. FINANCIAL INFO:\n"
+                "   Ask about: annual income range, average monthly spending amount. Prompt until complete, then confirm.\n\n"
+                "6. HOLIDAY PREFERENCES:\n"
+                "   Ask about: holiday activities the user likes to do. Prompt until complete, then confirm.\n\n"
+                "7. GROUP INVITATIONS (ONLY if user has group_role = 'admin'):\n"
+                "   - If the user joined an existing group (group_role = 'member'), SKIP this step entirely.\n"
+                "   - If the user skipped group setup (group_role = 'admin'), ask: 'Would you like to setup a group with people you know? This can always be done later.' "
+                "If the user says yes, respond with 'Please invite users to your new group by providing their email addresses.' "
+                "When they provide email addresses, respond with 'To confirm, I will be sending invites to {list all provided email addresses}. Are they correct?' "
+                "If they confirm yes, use send_group_invites_tool to send the invitation emails.\n\n"
+                "Finally, ONLY when all the above onboarding process is completed, respond: "
+                "'Thank you, this completes your onboarding to Arny!'\n\n"
                 "Always be friendly, conversational, and helpful. Keep track of what information you've already collected to avoid asking the same questions twice. "
                 "The first message from the user will be their group code response."
             ),
@@ -219,7 +254,7 @@ class OnboardingAgent:
                 scan_email_for_profile_tool,
                 send_group_invites_tool,
                 validate_group_code_tool,
-                create_new_group_tool
+                skip_group_setup_tool
             ]
         )
     
@@ -243,12 +278,11 @@ class OnboardingAgent:
                 context_messages.append(msg)
             
             # Process with agent
-            
             if not context_messages:
-                # First message - FIXED: use await Runner.run instead of Runner.run_sync
+                # First message
                 result = await Runner.run(self.agent, message)
             else:
-                # Continue conversation with context - FIXED: use await Runner.run instead of Runner.run_sync
+                # Continue conversation with context
                 result = await Runner.run(self.agent, context_messages + [{"role": "user", "content": message}])
             
             # Extract response
