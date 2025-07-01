@@ -16,6 +16,14 @@ from .user_profile_agent import UserProfileAgent
 # Configure logger
 logger = logging.getLogger(__name__)
 
+# Global variable to store the current agent instance
+_current_flight_agent = None
+
+def _get_flight_agent():
+    """Get the current flight agent instance"""
+    global _current_flight_agent
+    return _current_flight_agent
+
 # ===== Enhanced Airport Code Mapping =====
 AIRPORT_CODE_MAPPING = {
     # Major cities to airport codes
@@ -104,16 +112,278 @@ AIRPORT_CODE_MAPPING = {
     "kuala lumpur": "KUL",
 }
 
+# ==================== STANDALONE TOOL FUNCTIONS ====================
+
+@function_tool
+def search_flights_tool(origin: str, destination: str, departure_date: str, 
+                       return_date: Optional[str] = None, adults: int = 1, 
+                       cabin_class: str = "ECONOMY") -> dict:
+    """
+    Search for flights using Amadeus API with group profile filtering
+    
+    Args:
+        origin: Origin airport/city code (e.g., 'SYD', 'Sydney')
+        destination: Destination airport/city code (e.g., 'LAX', 'Los Angeles')
+        departure_date: Departure date in YYYY-MM-DD format
+        return_date: Return date in YYYY-MM-DD format (optional for one-way)
+        adults: Number of adult passengers (default 1)
+        cabin_class: Cabin class - ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST
+    
+    Returns:
+        Dict with flight search results and profile filtering information
+    """
+    
+    try:
+        agent = _get_flight_agent()
+        if not agent:
+            return {"success": False, "error": "Flight agent not available"}
+        
+        # Convert city names to airport codes if needed
+        origin_code = agent._convert_to_airport_code(origin)
+        destination_code = agent._convert_to_airport_code(destination)
+        
+        # Perform flight search
+        import asyncio
+        search_results = asyncio.run(agent.amadeus_service.search_flights(
+            origin=origin_code,
+            destination=destination_code,
+            departure_date=departure_date,
+            return_date=return_date,
+            adults=adults,
+            cabin_class=cabin_class,
+            max_results=12  # Get more results for better filtering
+        ))
+        
+        if not search_results.get("success"):
+            return {
+                "success": False,
+                "error": search_results.get("error", "Flight search failed"),
+                "message": f"Sorry, I couldn't find flights from {origin} to {destination} on {departure_date}. Please check your dates and destinations."
+            }
+        
+        # Apply profile-based filtering
+        search_params = {
+            "origin": origin_code,
+            "destination": destination_code,
+            "departure_date": departure_date,
+            "return_date": return_date,
+            "adults": adults,
+            "cabin_class": cabin_class
+        }
+        
+        # Filter results based on group profiles
+        filtering_result = asyncio.run(agent.profile_agent.filter_flight_results(
+            user_id=agent.current_user_id,
+            flight_results=search_results["results"],
+            search_params=search_params
+        ))
+        
+        # Save search to database (save original results for analytics)
+        flight_search = FlightSearch(
+            search_id=str(uuid.uuid4()),
+            user_id=agent.current_user_id,
+            origin=origin_code,
+            destination=destination_code,
+            departure_date=departure_date,
+            return_date=return_date,
+            passengers=adults,
+            cabin_class=cabin_class,
+            search_results=search_results["results"],  # Save original results
+            result_count=len(filtering_result["filtered_results"]),
+            search_successful=True
+        )
+        
+        asyncio.run(agent.db.save_flight_search(flight_search))
+        
+        # Format results for presentation
+        formatted_results = agent._format_flight_results_for_agent(
+            filtering_result["filtered_results"], 
+            origin_code, 
+            destination_code, 
+            departure_date,
+            filtering_result
+        )
+        
+        return {
+            "success": True,
+            "results": filtering_result["filtered_results"],
+            "formatted_results": formatted_results,
+            "search_id": flight_search.search_id,
+            "search_params": search_params,
+            "filtering_info": {
+                "original_count": filtering_result["original_count"],
+                "filtered_count": filtering_result["filtered_count"],
+                "filtering_applied": filtering_result["filtering_applied"],
+                "group_size": filtering_result.get("group_size", 1),
+                "rationale": filtering_result["rationale"]
+            }
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"I encountered an error searching for flights: {str(e)}"
+        }
+
+@function_tool
+def search_airports_tool(keyword: str, subtype: str = "AIRPORT") -> dict:
+    """
+    Search for airports based on keyword.
+    
+    Args:
+        keyword: Search keyword, such as city name or airport code
+        subtype: Location type, defaults to AIRPORT
+    """
+    logger.info(f"Searching airports: {keyword}, type: {subtype}")
+    
+    try:
+        agent = _get_flight_agent()
+        if not agent:
+            return {"success": False, "error": "Flight agent not available"}
+        
+        airports = asyncio.run(agent.amadeus_service.search_airports(keyword, subtype))
+        
+        if not airports:
+            return {
+                "success": False,
+                "message": f"No airports found matching '{keyword}'."
+            }
+        
+        result = f"Found {len(airports)} airports matching '{keyword}':\n\n"
+        
+        for airport in airports:
+            name = airport.get('name', 'Unknown')
+            iata_code = airport.get('iataCode', 'Unknown')
+            city = airport.get('address', {}).get('cityName', 'Unknown')
+            country = airport.get('address', {}).get('countryName', 'Unknown')
+            
+            result += f"- {name} ({iata_code})\n"
+            result += f"  City: {city}, Country: {country}\n\n"
+        
+        return {
+            "success": True,
+            "message": result,
+            "airports": airports
+        }
+    except Exception as e:
+        logger.error(f"Error searching airports: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"Error searching for airports: {str(e)}"
+        }
+
+@function_tool
+def get_checkin_links_tool(airline_code: str) -> dict:
+    """
+    Get online check-in links for an airline.
+    
+    Args:
+        airline_code: Airline code (e.g., 'CA')
+    """
+    logger.info(f"Getting check-in links for airline: {airline_code}")
+    
+    try:
+        agent = _get_flight_agent()
+        if not agent:
+            return {"success": False, "error": "Flight agent not available"}
+        
+        links = asyncio.run(agent.amadeus_service.get_flight_checkin_links(airline_code))
+        
+        if not links:
+            return {
+                "success": False,
+                "message": f"No check-in links found for airline {airline_code}."
+            }
+        
+        result = f"Found {len(links)} check-in links for {airline_code} airline:\n\n"
+        
+        for link in links:
+            link_type = link.get('type', 'Unknown')
+            airline = link.get('airline', {}).get('name', airline_code)
+            url = link.get('href', 'Unknown')
+            
+            result += f"- {airline}\n"
+            result += f"  Type: {link_type}\n"
+            result += f"  Link: {url}\n\n"
+        
+        return {
+            "success": True,
+            "message": result,
+            "links": links
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting check-in links: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"Error getting check-in links: {str(e)}"
+        }
+
+@function_tool
+def get_flight_pricing_tool(flight_selection: str) -> dict:
+    """
+    Get accurate pricing for a selected flight
+    
+    Args:
+        flight_selection: Description of which flight the user selected (e.g., "flight 1", "the morning flight")
+    
+    Returns:
+        Dict with detailed pricing information
+    """
+    
+    try:
+        agent = _get_flight_agent()
+        if not agent:
+            return {"success": False, "error": "Flight agent not available"}
+        
+        # Extract flight number from selection
+        flight_number = agent._extract_flight_number(flight_selection)
+        
+        if not flight_number:
+            return {
+                "success": False,
+                "message": "I couldn't determine which flight you selected. Please specify like 'flight 1' or 'the first option'."
+            }
+        
+        # For now, return a detailed pricing response
+        # In production, this would call Amadeus Flight Offers Price API
+        return {
+            "success": True,
+            "message": f"Getting accurate pricing for flight {flight_number}...",
+            "flight_number": flight_number,
+            "pricing_info": {
+                "note": "This would contain detailed pricing from Amadeus Flight Offers Price API",
+                "includes": ["taxes", "fees", "cancellation_policy", "baggage_allowance"]
+            }
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"I encountered an error getting flight pricing: {str(e)}"
+        }
+
+# ==================== FLIGHT AGENT CLASS ====================
+
 class FlightAgent:
     """
     Flight agent using OpenAI Agents SDK with Amadeus API tools and profile filtering
     """
     
     def __init__(self):
+        global _current_flight_agent
+        
         self.openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
         self.amadeus_service = AmadeusService()
         self.db = DatabaseOperations()
         self.profile_agent = UserProfileAgent()
+        
+        # Store this instance globally for tool access
+        _current_flight_agent = self
         
         # Create the agent with enhanced flight search tools
         self.agent = Agent(
@@ -121,10 +391,10 @@ class FlightAgent:
             instructions=self._get_system_instructions(),
             model="o4-mini",
             tools=[
-                self._search_flights_tool,
-                self._search_airports_tool,
-                self._get_checkin_links_tool,
-                self._get_flight_pricing_tool
+                search_flights_tool,
+                search_airports_tool,
+                get_checkin_links_tool,
+                get_flight_pricing_tool
             ]
         )
     
@@ -194,8 +464,8 @@ class FlightAgent:
 
 Your main responsibilities are:
 1. Understanding users' flight needs and extracting key information from natural language descriptions
-2. Using the search_flights tool to search for flights that meet user requirements
-3. Using search_airports tool when users need airport information or codes
+2. Using the search_flights_tool to search for flights that meet user requirements
+3. Using search_airports_tool when users need airport information or codes
 4. Providing clear, detailed flight options and information to users
 5. Assisting users with check-in links when they have booked flights
 
@@ -217,7 +487,7 @@ Key guidelines:
 - Help users understand the differences between flights
 - If they select a flight, get accurate pricing and availability
 - Explain when group filtering has been applied to help families/groups
-- Use search_airports tool if users ask about airport codes or airport information
+- Use search_airports_tool if users ask about airport codes or airport information
 - Provide check-in links when users ask about online check-in
 
 Workflow:
@@ -228,253 +498,11 @@ Workflow:
    - adults: Number of adult passengers, default is 1
    - max_results: Maximum number of results, default is 3
 
-2. Use the search_flights tool to perform flight search
+2. Use the search_flights_tool to perform flight search
 3. Display search results completely, including all flight details
 
 Always respond in English. When presenting flight information, use clear formatting to make it easy to read.
 """
-
-    # ==================== AGENT TOOLS ====================
-    
-    @function_tool
-    def _search_flights_tool(self, origin: str, destination: str, departure_date: str, 
-                           return_date: Optional[str] = None, adults: int = 1, 
-                           cabin_class: str = "ECONOMY") -> dict:
-        """
-        Search for flights using Amadeus API with group profile filtering
-        
-        Args:
-            origin: Origin airport/city code (e.g., 'SYD', 'Sydney')
-            destination: Destination airport/city code (e.g., 'LAX', 'Los Angeles')
-            departure_date: Departure date in YYYY-MM-DD format
-            return_date: Return date in YYYY-MM-DD format (optional for one-way)
-            adults: Number of adult passengers (default 1)
-            cabin_class: Cabin class - ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST
-        
-        Returns:
-            Dict with flight search results and profile filtering information
-        """
-        
-        try:
-            # Convert city names to airport codes if needed
-            origin_code = self._convert_to_airport_code(origin)
-            destination_code = self._convert_to_airport_code(destination)
-            
-            # Perform flight search
-            import asyncio
-            search_results = asyncio.run(self.amadeus_service.search_flights(
-                origin=origin_code,
-                destination=destination_code,
-                departure_date=departure_date,
-                return_date=return_date,
-                adults=adults,
-                cabin_class=cabin_class,
-                max_results=12  # Get more results for better filtering
-            ))
-            
-            if not search_results.get("success"):
-                return {
-                    "success": False,
-                    "error": search_results.get("error", "Flight search failed"),
-                    "message": f"Sorry, I couldn't find flights from {origin} to {destination} on {departure_date}. Please check your dates and destinations."
-                }
-            
-            # Apply profile-based filtering
-            search_params = {
-                "origin": origin_code,
-                "destination": destination_code,
-                "departure_date": departure_date,
-                "return_date": return_date,
-                "adults": adults,
-                "cabin_class": cabin_class
-            }
-            
-            # Filter results based on group profiles
-            filtering_result = asyncio.run(self.profile_agent.filter_flight_results(
-                user_id=self.current_user_id,
-                flight_results=search_results["results"],
-                search_params=search_params
-            ))
-            
-            # Save search to database (save original results for analytics)
-            flight_search = FlightSearch(
-                search_id=str(uuid.uuid4()),
-                user_id=self.current_user_id,
-                origin=origin_code,
-                destination=destination_code,
-                departure_date=departure_date,
-                return_date=return_date,
-                passengers=adults,
-                cabin_class=cabin_class,
-                search_results=search_results["results"],  # Save original results
-                result_count=len(filtering_result["filtered_results"]),
-                search_successful=True
-            )
-            
-            asyncio.run(self.db.save_flight_search(flight_search))
-            
-            # Format results for presentation
-            formatted_results = self._format_flight_results_for_agent(
-                filtering_result["filtered_results"], 
-                origin_code, 
-                destination_code, 
-                departure_date,
-                filtering_result
-            )
-            
-            return {
-                "success": True,
-                "results": filtering_result["filtered_results"],
-                "formatted_results": formatted_results,
-                "search_id": flight_search.search_id,
-                "search_params": search_params,
-                "filtering_info": {
-                    "original_count": filtering_result["original_count"],
-                    "filtered_count": filtering_result["filtered_count"],
-                    "filtering_applied": filtering_result["filtering_applied"],
-                    "group_size": filtering_result.get("group_size", 1),
-                    "rationale": filtering_result["rationale"]
-                }
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e),
-                "message": f"I encountered an error searching for flights: {str(e)}"
-            }
-    
-    @function_tool
-    def _search_airports_tool(self, keyword: str, subtype: str = "AIRPORT") -> dict:
-        """
-        Search for airports based on keyword.
-        
-        Args:
-            keyword: Search keyword, such as city name or airport code
-            subtype: Location type, defaults to AIRPORT
-        """
-        logger.info(f"Searching airports: {keyword}, type: {subtype}")
-        
-        try:
-            airports = asyncio.run(self.amadeus_service.search_airports(keyword, subtype))
-            
-            if not airports:
-                return {
-                    "success": False,
-                    "message": f"No airports found matching '{keyword}'."
-                }
-            
-            result = f"Found {len(airports)} airports matching '{keyword}':\n\n"
-            
-            for airport in airports:
-                name = airport.get('name', 'Unknown')
-                iata_code = airport.get('iataCode', 'Unknown')
-                city = airport.get('address', {}).get('cityName', 'Unknown')
-                country = airport.get('address', {}).get('countryName', 'Unknown')
-                
-                result += f"- {name} ({iata_code})\n"
-                result += f"  City: {city}, Country: {country}\n\n"
-            
-            return {
-                "success": True,
-                "message": result,
-                "airports": airports
-            }
-        except Exception as e:
-            logger.error(f"Error searching airports: {str(e)}")
-            return {
-                "success": False,
-                "error": str(e),
-                "message": f"Error searching for airports: {str(e)}"
-            }
-
-    @function_tool
-    def _get_checkin_links_tool(self, airline_code: str) -> dict:
-        """
-        Get online check-in links for an airline.
-        
-        Args:
-            airline_code: Airline code (e.g., 'CA')
-        """
-        logger.info(f"Getting check-in links for airline: {airline_code}")
-        
-        try:
-            links = asyncio.run(self.amadeus_service.get_flight_checkin_links(airline_code))
-            
-            if not links:
-                return {
-                    "success": False,
-                    "message": f"No check-in links found for airline {airline_code}."
-                }
-            
-            result = f"Found {len(links)} check-in links for {airline_code} airline:\n\n"
-            
-            for link in links:
-                link_type = link.get('type', 'Unknown')
-                airline = link.get('airline', {}).get('name', airline_code)
-                url = link.get('href', 'Unknown')
-                
-                result += f"- {airline}\n"
-                result += f"  Type: {link_type}\n"
-                result += f"  Link: {url}\n\n"
-            
-            return {
-                "success": True,
-                "message": result,
-                "links": links
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting check-in links: {str(e)}")
-            return {
-                "success": False,
-                "error": str(e),
-                "message": f"Error getting check-in links: {str(e)}"
-            }
-
-    @function_tool
-    def _get_flight_pricing_tool(self, flight_selection: str) -> dict:
-        """
-        Get accurate pricing for a selected flight
-        
-        Args:
-            flight_selection: Description of which flight the user selected (e.g., "flight 1", "the morning flight")
-            search_context: Additional context about the search
-        
-        Returns:
-            Dict with detailed pricing information
-        """
-        
-        try:
-            # Extract flight number from selection
-            flight_number = self._extract_flight_number(flight_selection)
-            
-            if not flight_number:
-                return {
-                    "success": False,
-                    "message": "I couldn't determine which flight you selected. Please specify like 'flight 1' or 'the first option'."
-                }
-            
-            # For now, return a detailed pricing response
-            # In production, this would call Amadeus Flight Offers Price API
-            return {
-                "success": True,
-                "message": f"Getting accurate pricing for flight {flight_number}...",
-                "flight_number": flight_number,
-                "pricing_info": {
-                    "note": "This would contain detailed pricing from Amadeus Flight Offers Price API",
-                    "includes": ["taxes", "fees", "cancellation_policy", "baggage_allowance"]
-                }
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e),
-                "message": f"I encountered an error getting flight pricing: {str(e)}"
-            }
-    
-    # ==================== HELPER METHODS ====================
     
     def _convert_to_airport_code(self, location: str) -> str:
         """Convert city names to airport codes using enhanced mapping"""
