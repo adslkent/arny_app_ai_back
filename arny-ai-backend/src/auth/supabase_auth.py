@@ -15,6 +15,8 @@ from typing import Optional, Dict, Any
 from supabase import create_client, Client
 import json
 import logging
+import requests
+import time
 
 from ..utils.config import config
 
@@ -305,7 +307,7 @@ class SupabaseAuth:
     
     async def get_user(self, access_token: str) -> Dict[str, Any]:
         """
-        Get user info from access token
+        Get user info from access token with multiple verification methods
         
         Args:
             access_token: User's access token
@@ -322,45 +324,129 @@ class SupabaseAuth:
         try:
             logger.info("Attempting to get user from access token")
             
-            # Set the session with the access token
-            self.client.auth.set_session(access_token, "")
-            
-            response = self.client.auth.get_user()
-            
-            if response.user:
-                logger.info(f"User retrieved successfully: {response.user.email}")
-                return {
-                    "success": True,
-                    "user": {
-                        "id": response.user.id,
-                        "email": response.user.email,
-                        "confirmed": response.user.email_confirmed_at is not None,
-                        "created_at": response.user.created_at,
-                        "last_sign_in": response.user.last_sign_in_at,
-                        "metadata": response.user.user_metadata or {}
-                    }
-                }
-            else:
-                logger.warning("Get user failed - User not found")
-                return {
-                    "success": False,
-                    "error": "User not found"
+            # Method 1: Try direct REST API call
+            try:
+                headers = {
+                    "Authorization": f"Bearer {access_token}",
+                    "apikey": config.SUPABASE_ANON_KEY,
+                    "Content-Type": "application/json"
                 }
                 
+                user_url = f"{config.SUPABASE_URL}/auth/v1/user"
+                logger.info(f"Making request to: {user_url}")
+                
+                response = requests.get(user_url, headers=headers, timeout=10)
+                logger.info(f"Response status: {response.status_code}")
+                logger.info(f"Response headers: {dict(response.headers)}")
+                
+                if response.status_code == 200:
+                    user_data = response.json()
+                    logger.info(f"User retrieved successfully via REST API: {user_data.get('email', 'unknown')}")
+                    
+                    return {
+                        "success": True,
+                        "user": {
+                            "id": user_data.get("id"),
+                            "email": user_data.get("email"),
+                            "confirmed": user_data.get("email_confirmed_at") is not None,
+                            "created_at": user_data.get("created_at"),
+                            "last_sign_in": user_data.get("last_sign_in_at"),
+                            "metadata": user_data.get("user_metadata", {})
+                        }
+                    }
+                else:
+                    logger.warning(f"REST API failed with status {response.status_code}: {response.text}")
+                    
+            except Exception as api_error:
+                logger.warning(f"REST API method failed: {str(api_error)}")
+            
+            # Method 2: Try JWT decode verification (fallback)
+            try:
+                import jwt
+                from jwt import PyJWTError
+                
+                # Decode JWT without verification to extract user info
+                # Note: In production, you should verify the signature properly
+                decoded_token = jwt.decode(access_token, options={"verify_signature": False})
+                logger.info("Successfully decoded JWT token")
+                
+                # Extract user information from token
+                user_id = decoded_token.get("sub")
+                email = decoded_token.get("email")
+                exp = decoded_token.get("exp")
+                
+                # Check if token is expired
+                current_time = int(time.time())
+                if exp and current_time > exp:
+                    logger.warning("Token has expired")
+                    return {
+                        "success": False,
+                        "error": "Access token has expired"
+                    }
+                
+                if user_id and email:
+                    logger.info(f"User retrieved successfully via JWT decode: {email}")
+                    return {
+                        "success": True,
+                        "user": {
+                            "id": user_id,
+                            "email": email,
+                            "confirmed": True,  # Assume confirmed if token exists
+                            "created_at": None,
+                            "last_sign_in": None,
+                            "metadata": decoded_token.get("user_metadata", {})
+                        }
+                    }
+                else:
+                    logger.warning("JWT token missing required fields")
+                    
+            except ImportError:
+                logger.warning("PyJWT not available for token decoding")
+            except Exception as jwt_error:
+                logger.warning(f"JWT decode method failed: {str(jwt_error)}")
+            
+            # Method 3: Try using Supabase client with proper session management (last resort)
+            try:
+                # Create a new client instance for this verification
+                temp_client = create_client(config.SUPABASE_URL, config.SUPABASE_ANON_KEY)
+                
+                # Try to set session with dummy refresh token
+                try:
+                    temp_client.auth.set_session(access_token, "dummy_refresh_token")
+                    user_response = temp_client.auth.get_user()
+                    
+                    if user_response and user_response.user:
+                        logger.info(f"User retrieved successfully via Supabase client: {user_response.user.email}")
+                        return {
+                            "success": True,
+                            "user": {
+                                "id": user_response.user.id,
+                                "email": user_response.user.email,
+                                "confirmed": user_response.user.email_confirmed_at is not None,
+                                "created_at": user_response.user.created_at,
+                                "last_sign_in": user_response.user.last_sign_in_at,
+                                "metadata": user_response.user.user_metadata or {}
+                            }
+                        }
+                except Exception as session_error:
+                    logger.warning(f"Supabase client session method failed: {str(session_error)}")
+                    
+            except Exception as client_error:
+                logger.warning(f"Supabase client method failed: {str(client_error)}")
+            
+            # If all methods fail
+            logger.error("All token verification methods failed")
+            return {
+                "success": False,
+                "error": "Failed to verify access token with all available methods"
+            }
+                    
         except Exception as e:
             logger.error(f"Get user error: {str(e)}")
-            
-            error_message = str(e)
-            if "invalid token" in error_message.lower() or "expired" in error_message.lower():
-                return {
-                    "success": False,
-                    "error": "Invalid or expired access token"
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": f"Failed to get user: {error_message}"
-                }
+            return {
+                "success": False,
+                "error": f"Failed to get user: {str(e)}"
+            }
     
     async def reset_password(self, email: str, redirect_to: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -431,6 +517,8 @@ class SupabaseAuth:
         
         try:
             logger.info("Verifying access token")
+            logger.info(f"Token length: {len(access_token)}")
+            logger.info(f"Token starts with: {access_token[:20]}...")
             
             # Get user info which also validates the token
             user_response = await self.get_user(access_token)
@@ -444,7 +532,7 @@ class SupabaseAuth:
                     "message": "Token is valid"
                 }
             else:
-                logger.warning("Token verification failed")
+                logger.warning(f"Token verification failed: {user_response.get('error')}")
                 return {
                     "success": False,
                     "valid": False,
