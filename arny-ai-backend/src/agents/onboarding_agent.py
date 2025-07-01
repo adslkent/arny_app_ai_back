@@ -86,11 +86,11 @@ class OnboardingAgent:
             # Process with agent
             
             if not context_messages:
-                # First message
-                result = Runner.run_sync(self.agent, message)
+                # First message - FIXED: use await Runner.run instead of Runner.run_sync
+                result = await Runner.run(self.agent, message)
             else:
-                # Continue conversation with context
-                result = Runner.run_sync(self.agent, context_messages + [{"role": "user", "content": message}])
+                # Continue conversation with context - FIXED: use await Runner.run instead of Runner.run_sync
+                result = await Runner.run(self.agent, context_messages + [{"role": "user", "content": message}])
             
             # Extract response
             assistant_message = result.final_output
