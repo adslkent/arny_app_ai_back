@@ -30,21 +30,34 @@ def _get_onboarding_agent():
     global _current_onboarding_agent
     return _current_onboarding_agent
 
-def _run_async_in_thread(coro):
+def _run_async_safely(coro):
     """
-    Run async coroutine in a thread pool to avoid event loop conflicts
+    Run async coroutine safely by using the current event loop or creating a new one
     """
-    def run_in_thread():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
-    
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future = executor.submit(run_in_thread)
-        return future.result()
+    try:
+        # Try to get the current event loop
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If loop is running, use run_in_executor to run in a thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(_run_in_new_loop, coro)
+                return future.result()
+        else:
+            # If no loop is running, use asyncio.run
+            return asyncio.run(coro)
+    except RuntimeError:
+        # If no event loop exists, create one
+        return asyncio.run(coro)
+
+def _run_in_new_loop(coro):
+    """Run coroutine in a completely new event loop"""
+    new_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(new_loop)
+    try:
+        return new_loop.run_until_complete(coro)
+    finally:
+        new_loop.close()
+        asyncio.set_event_loop(None)
 
 # ==================== STANDALONE TOOL FUNCTIONS ====================
 
@@ -74,6 +87,7 @@ def scan_email_for_profile_tool(email: str) -> dict:
         return profile_data
         
     except Exception as e:
+        print(f"Error in scan_email_for_profile_tool: {str(e)}")
         return {
             "name": None,
             "gender": None,
@@ -115,6 +129,7 @@ def send_group_invites_tool(email_addresses: str) -> dict:
         }
         
     except Exception as e:
+        print(f"Error in send_group_invites_tool: {str(e)}")
         return {"success": False, "error": str(e)}
 
 @function_tool
@@ -127,36 +142,49 @@ def validate_group_code_tool(group_code: str) -> dict:
         if not agent:
             return {"valid": False, "error": "Agent not available"}
         
+        print(f"🔍 Validating group code: {group_code}")
+        
         # Check if user wants to skip
         if group_code.lower() in ["skip", "no", "none", "later"]:
+            print("👤 User wants to skip group setup")
             return {"valid": False, "skip": True, "message": "User wants to skip group setup"}
         
         # Validate format
         formatted_code = agent.group_generator.format_group_code(group_code)
         is_valid = agent.group_generator.validate_group_code(formatted_code)
         
+        print(f"📝 Formatted code: {formatted_code}, Valid format: {is_valid}")
+        
         if not is_valid:
             return {"valid": False, "exists": False, "message": "Invalid group code format. Group codes should be 4-10 alphanumeric characters. Please check the group code and try again, or type 'skip' to skip group setup for now."}
         
-        # Check if group exists in database using thread pool
+        # Check if group exists in database using safe async handling
         try:
-            group_exists = _run_async_in_thread(agent.db.check_group_exists(formatted_code))
+            print("🔍 Checking if group exists in database...")
+            group_exists = _run_async_safely(agent.db.check_group_exists(formatted_code))
+            print(f"📊 Group exists: {group_exists}")
         except Exception as db_error:
-            print(f"Database error checking group existence: {str(db_error)}")
+            print(f"❌ Database error checking group existence: {str(db_error)}")
+            import traceback
+            traceback.print_exc()
             return {"valid": False, "error": f"Database error: {str(db_error)}"}
         
         if group_exists:
             # Add user to existing group as member
             try:
-                success = _run_async_in_thread(agent.db.add_group_member(formatted_code, agent.current_user_id, "member"))
+                print(f"➕ Adding user {agent.current_user_id} to existing group {formatted_code}")
+                success = _run_async_safely(agent.db.add_group_member(formatted_code, agent.current_user_id, "member"))
+                print(f"✅ Successfully added to group: {success}")
             except Exception as db_error:
-                print(f"Database error joining group: {str(db_error)}")
+                print(f"❌ Database error joining group: {str(db_error)}")
                 return {"valid": True, "exists": True, "error": f"Failed to join group: {str(db_error)}"}
             
             if success:
                 # Store group info
                 agent.current_collected_data["group_code"] = formatted_code
                 agent.current_collected_data["group_role"] = "member"
+                
+                print(f"📈 Updated collected data: {agent.current_collected_data}")
                 
                 return {
                     "valid": True,
@@ -171,6 +199,7 @@ def validate_group_code_tool(group_code: str) -> dict:
                     "error": f"Failed to join group {formatted_code}. You may already be a member."
                 }
         else:
+            print(f"❌ Group {formatted_code} does not exist")
             return {
                 "valid": True,
                 "exists": False,
@@ -179,7 +208,9 @@ def validate_group_code_tool(group_code: str) -> dict:
             }
             
     except Exception as e:
-        print(f"Error in validate_group_code_tool: {str(e)}")
+        print(f"❌ Error in validate_group_code_tool: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return {"valid": False, "error": str(e)}
 
 @function_tool
@@ -192,21 +223,29 @@ def skip_group_setup_tool() -> dict:
         if not agent:
             return {"success": False, "error": "Agent not available"}
         
+        print("⏭️ Skipping group setup - generating new group code")
+        
         # Generate a unique random group code for this user
         try:
-            existing_codes = _run_async_in_thread(agent.db.get_existing_group_codes())
+            print("🔍 Getting existing group codes...")
+            existing_codes = _run_async_safely(agent.db.get_existing_group_codes())
+            print(f"📊 Found {len(existing_codes)} existing codes")
         except Exception as db_error:
-            print(f"Database error getting existing codes: {str(db_error)}")
+            print(f"❌ Database error getting existing codes: {str(db_error)}")
             return {"success": False, "error": f"Database error getting existing codes: {str(db_error)}"}
         
         new_group_code = agent.group_generator.generate_unique_group_code(existing_codes)
-        print(f"Generated new group code: {new_group_code}")
+        print(f"🎲 Generated new group code: {new_group_code}")
         
         # Create group in database with user as admin
         try:
-            success = _run_async_in_thread(agent.db.add_group_member(new_group_code, agent.current_user_id, "admin"))
+            print(f"➕ Creating new group {new_group_code} with user {agent.current_user_id} as admin")
+            success = _run_async_safely(agent.db.add_group_member(new_group_code, agent.current_user_id, "admin"))
+            print(f"✅ Group creation success: {success}")
         except Exception as db_error:
-            print(f"Database error creating group: {str(db_error)}")
+            print(f"❌ Database error creating group: {str(db_error)}")
+            import traceback
+            traceback.print_exc()
             return {"success": False, "error": f"Database error creating group: {str(db_error)}"}
         
         if success:
@@ -215,7 +254,8 @@ def skip_group_setup_tool() -> dict:
             agent.current_collected_data["group_role"] = "admin"
             agent.current_collected_data["group_skipped"] = True
             
-            print(f"✅ Successfully created group {new_group_code} for user {agent.current_user_id}")
+            print(f"📈 Updated collected data: {agent.current_collected_data}")
+            print(f"🎉 Successfully created group {new_group_code} for user {agent.current_user_id}")
             
             return {
                 "success": True,
@@ -229,7 +269,7 @@ def skip_group_setup_tool() -> dict:
             }
         
     except Exception as e:
-        print(f"Error in skip_group_setup_tool: {str(e)}")
+        print(f"❌ Error in skip_group_setup_tool: {str(e)}")
         import traceback
         traceback.print_exc()
         return {"success": False, "error": str(e)}
