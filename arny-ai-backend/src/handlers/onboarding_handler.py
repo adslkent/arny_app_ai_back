@@ -45,22 +45,39 @@ class OnboardingHandler:
             if not access_token:
                 return self._error_response(401, "Missing access_token")
             
+            # Validate user_id format - more lenient validation
+            try:
+                # Strip whitespace and validate UUID format
+                user_id = str(user_id).strip()
+                uuid.UUID(user_id)
+            except (ValueError, TypeError) as e:
+                print(f"UUID validation error for user_id '{user_id}': {e}")
+                return self._error_response(400, f"Invalid user_id format: {user_id}")
+            
             # Verify user authentication
             auth_result = await self.auth.verify_token(access_token)
             if not auth_result.get("success"):
                 return self._error_response(401, "Invalid or expired token")
             
             # Check if onboarding is already complete
-            user_status = await self.db.get_user_status(user_id)
-            if user_status and user_status.get('onboarding_completed', False):
-                return self._success_response({
-                    'response': 'Your onboarding is already complete! You can now use Arny to plan your travels.',
-                    'onboarding_complete': True,
-                    'redirect_to_main': True
-                })
+            try:
+                user_status = await self.db.get_user_status(user_id)
+                if user_status and user_status.get('onboarding_completed', False):
+                    return self._success_response({
+                        'response': 'Your onboarding is already complete! You can now use Arny to plan your travels.',
+                        'onboarding_complete': True,
+                        'redirect_to_main': True
+                    })
+            except Exception as status_error:
+                print(f"Warning: Could not check user status: {status_error}")
+                # Continue with onboarding even if status check fails
             
             # Get user's onboarding progress
-            onboarding_progress = await self.db.get_onboarding_progress(user_id)
+            try:
+                onboarding_progress = await self.db.get_onboarding_progress(user_id)
+            except Exception as progress_error:
+                print(f"Warning: Could not get onboarding progress: {progress_error}")
+                onboarding_progress = None
             
             # Convert progress to dict format (compatible with LLM-driven agent)
             progress_data = {
@@ -70,18 +87,31 @@ class OnboardingHandler:
             
             if onboarding_progress:
                 # Extract conversation history and collected data from stored progress
-                stored_data = onboarding_progress.collected_data or {}
-                progress_data['collected_data'] = stored_data.get('collected_data', {})
-                progress_data['conversation_history'] = stored_data.get('conversation_history', [])
-                progress_data['current_step'] = onboarding_progress.current_step.value
+                try:
+                    stored_data = onboarding_progress.collected_data or {}
+                    if isinstance(stored_data, str):
+                        stored_data = json.loads(stored_data)
+                    
+                    progress_data['collected_data'] = stored_data.get('collected_data', {})
+                    progress_data['conversation_history'] = stored_data.get('conversation_history', [])
+                    progress_data['current_step'] = onboarding_progress.current_step.value
+                except (json.JSONDecodeError, AttributeError) as parse_error:
+                    print(f"Warning: Could not parse progress data: {parse_error}")
+                    # Continue with empty progress data
             
             # Process message with LLM-driven onboarding agent
-            agent_response = await self.onboarding_agent.process_message(
-                user_id=user_id,
-                message=message,
-                session_id=session_id,
-                current_progress=progress_data
-            )
+            try:
+                agent_response = await self.onboarding_agent.process_message(
+                    user_id=user_id,
+                    message=message,
+                    session_id=session_id,
+                    current_progress=progress_data
+                )
+            except Exception as agent_error:
+                print(f"Error in onboarding agent: {agent_error}")
+                import traceback
+                traceback.print_exc()
+                return self._error_response(500, f"Onboarding agent error: {str(agent_error)}")
             
             # Check if onboarding is complete
             if agent_response.get('onboarding_complete', False):
@@ -107,6 +137,8 @@ class OnboardingHandler:
             
         except Exception as e:
             print(f"Error in onboarding handler: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return self._error_response(500, "Internal server error")
     
     async def handle_group_code_check(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -198,6 +230,13 @@ class OnboardingHandler:
             if not access_token:
                 return self._error_response(401, "Missing access_token")
             
+            # Validate user_id format
+            try:
+                user_id = str(user_id).strip()
+                uuid.UUID(user_id)
+            except (ValueError, TypeError):
+                return self._error_response(400, f"Invalid user_id format: {user_id}")
+            
             # Verify authentication
             auth_result = await self.auth.verify_token(access_token)
             if not auth_result.get("success"):
@@ -248,6 +287,13 @@ class OnboardingHandler:
             
             if not access_token:
                 return self._error_response(401, "Missing access_token")
+            
+            # Validate user_id format
+            try:
+                user_id = str(user_id).strip()
+                uuid.UUID(user_id)
+            except (ValueError, TypeError):
+                return self._error_response(400, f"Invalid user_id format: {user_id}")
             
             # Verify authentication
             auth_result = await self.auth.verify_token(access_token)
@@ -308,6 +354,13 @@ class OnboardingHandler:
             if not access_token:
                 return self._error_response(401, "Missing access_token")
             
+            # Validate user_id format
+            try:
+                user_id = str(user_id).strip()
+                uuid.UUID(user_id)
+            except (ValueError, TypeError):
+                return self._error_response(400, f"Invalid user_id format: {user_id}")
+            
             # Verify authentication
             auth_result = await self.auth.verify_token(access_token)
             if not auth_result.get("success"):
@@ -321,6 +374,12 @@ class OnboardingHandler:
                 progress_info = {}
                 if onboarding_progress:
                     stored_data = onboarding_progress.collected_data or {}
+                    if isinstance(stored_data, str):
+                        try:
+                            stored_data = json.loads(stored_data)
+                        except json.JSONDecodeError:
+                            stored_data = {}
+                    
                     progress_info = {
                         'current_step': onboarding_progress.current_step.value,
                         'collected_fields': list(stored_data.get('collected_data', {}).keys()),
