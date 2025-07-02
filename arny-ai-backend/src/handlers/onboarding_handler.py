@@ -45,13 +45,35 @@ class OnboardingHandler:
             if not access_token:
                 return self._error_response(401, "Missing access_token")
             
-            # Validate user_id format - more lenient validation
+            # ENHANCED UUID validation with better error handling
             try:
                 # Strip whitespace and validate UUID format
                 user_id = str(user_id).strip()
-                uuid.UUID(user_id)
+                
+                # More robust UUID validation
+                if not user_id:
+                    raise ValueError("user_id is empty after stripping")
+                
+                # Check if it looks like a UUID (basic format check first)
+                if len(user_id) != 36:
+                    raise ValueError(f"user_id length is {len(user_id)}, expected 36")
+                
+                if user_id.count('-') != 4:
+                    raise ValueError(f"user_id has {user_id.count('-')} dashes, expected 4")
+                
+                # Now try the actual UUID validation
+                uuid_obj = uuid.UUID(user_id)
+                
+                # Ensure the string representation matches (handles case issues)
+                user_id = str(uuid_obj)
+                
+                print(f"✅ UUID validation passed for user_id: {user_id}")
+                
             except (ValueError, TypeError) as e:
-                print(f"UUID validation error for user_id '{user_id}': {e}")
+                print(f"❌ UUID validation error for user_id '{user_id}': {e}")
+                print(f"   Raw user_id type: {type(body.get('user_id'))}")
+                print(f"   Raw user_id value: '{body.get('user_id')}'")
+                print(f"   Processed user_id: '{user_id}'")
                 return self._error_response(400, f"Invalid user_id format: {user_id}")
             
             # Verify user authentication
@@ -69,14 +91,14 @@ class OnboardingHandler:
                         'redirect_to_main': True
                     })
             except Exception as status_error:
-                print(f"Warning: Could not check user status: {status_error}")
+                print(f"⚠️  Warning: Could not check user status: {status_error}")
                 # Continue with onboarding even if status check fails
             
             # Get user's onboarding progress
             try:
                 onboarding_progress = await self.db.get_onboarding_progress(user_id)
             except Exception as progress_error:
-                print(f"Warning: Could not get onboarding progress: {progress_error}")
+                print(f"⚠️  Warning: Could not get onboarding progress: {progress_error}")
                 onboarding_progress = None
             
             # Convert progress to dict format (compatible with LLM-driven agent)
@@ -96,7 +118,7 @@ class OnboardingHandler:
                     progress_data['conversation_history'] = stored_data.get('conversation_history', [])
                     progress_data['current_step'] = onboarding_progress.current_step.value
                 except (json.JSONDecodeError, AttributeError) as parse_error:
-                    print(f"Warning: Could not parse progress data: {parse_error}")
+                    print(f"⚠️  Warning: Could not parse progress data: {parse_error}")
                     # Continue with empty progress data
             
             # Process message with LLM-driven onboarding agent
@@ -108,7 +130,7 @@ class OnboardingHandler:
                     current_progress=progress_data
                 )
             except Exception as agent_error:
-                print(f"Error in onboarding agent: {agent_error}")
+                print(f"❌ Error in onboarding agent: {agent_error}")
                 import traceback
                 traceback.print_exc()
                 return self._error_response(500, f"Onboarding agent error: {str(agent_error)}")
@@ -136,7 +158,7 @@ class OnboardingHandler:
                 })
             
         except Exception as e:
-            print(f"Error in onboarding handler: {str(e)}")
+            print(f"❌ Error in onboarding handler: {str(e)}")
             import traceback
             traceback.print_exc()
             return self._error_response(500, "Internal server error")
