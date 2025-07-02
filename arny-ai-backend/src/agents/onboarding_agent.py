@@ -288,7 +288,12 @@ def skip_group_setup_tool() -> dict:
 
 class OnboardingAgent:
     """
-    LLM-driven onboarding agent using OpenAI Agents SDK with tools
+    LLM-driven onboarding agent using OpenAI Agents SDK with tools - FIXED VERSION
+    
+    Fixed Issues:
+    1. Proper conversation state management
+    2. Better progress tracking and continuation
+    3. Improved step detection and flow control
     """
     
     def __init__(self):
@@ -309,6 +314,7 @@ class OnboardingAgent:
                 "You are Arny AI, a helpful onboarding assistant for a travel planner "
                 "personal assistant app. Your task is to obtain personal information from the "
                 "app user as part of the onboarding process. Follow these steps:\n\n"
+                "IMPORTANT: Continue conversations from where they left off based on collected data.\n\n"
                 "1. GROUP CODE SETUP:\n"
                 "   - When the user provides a Group Code, use validate_group_code_tool to check if it exists.\n"
                 "   - If the group EXISTS: They will automatically join it as a member.\n"
@@ -339,7 +345,7 @@ class OnboardingAgent:
                 "'Thank you, this completes your onboarding to Arny!'\n\n"
                 "Always be friendly, conversational, and helpful. Keep track of what information you've already collected to avoid asking the same questions twice. "
                 "DO NOT call the same tool multiple times in one response. "
-                "The first message from the user will be their group code response."
+                "CONTINUE FROM WHERE THE CONVERSATION LEFT OFF - check collected data to see what step to proceed with."
             ),
             model="o4-mini",
             tools=[
@@ -353,7 +359,7 @@ class OnboardingAgent:
     async def process_message(self, user_id: str, message: str, session_id: str, 
                             current_progress: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process message using OpenAI Agents SDK
+        Process message using OpenAI Agents SDK - FIXED VERSION
         """
         
         try:
@@ -367,13 +373,27 @@ class OnboardingAgent:
             # Get conversation history
             conversation_history = current_progress.get('conversation_history', [])
             
+            # Determine current step based on collected data
+            current_step = self._determine_current_step_from_data(self.current_collected_data)
+            print(f"🎯 Determined current step: {current_step}")
+            
             # Create conversation context for the agent
             context_messages = []
+            
+            # Add system context about current progress
+            if self.current_collected_data:
+                progress_summary = self._create_progress_summary(self.current_collected_data, current_step)
+                context_messages.append({
+                    "role": "system", 
+                    "content": f"CURRENT PROGRESS:\n{progress_summary}\n\nContinue from this point based on what's missing."
+                })
+            
+            # Add conversation history
             for msg in conversation_history:
                 context_messages.append(msg)
             
             # Process with agent
-            if not context_messages:
+            if not conversation_history:
                 # First message
                 print("🚀 Starting new conversation")
                 result = await Runner.run(self.agent, message)
@@ -408,9 +428,9 @@ class OnboardingAgent:
             
             # Save progress to database
             if not onboarding_complete:
-                current_step = self._determine_current_step(self.current_collected_data)
-                print(f"💾 Saving progress - Current step: {current_step.value}")
-                await self.db.update_onboarding_progress(user_id, current_step, updated_progress)
+                current_step_enum = self._determine_current_step(self.current_collected_data)
+                print(f"💾 Saving progress - Current step: {current_step_enum.value}")
+                await self.db.update_onboarding_progress(user_id, current_step_enum, updated_progress)
             else:
                 # Complete onboarding
                 print("🎉 Completing onboarding...")
@@ -433,6 +453,68 @@ class OnboardingAgent:
                 "collected_data": self.current_collected_data,
                 "error": str(e)
             }
+    
+    def _determine_current_step_from_data(self, collected_data: Dict[str, Any]) -> str:
+        """Determine current step based on collected data for progress summary"""
+        
+        if not collected_data.get("group_code"):
+            return "waiting_for_group_code"
+        elif not collected_data.get("email"):
+            return "waiting_for_email"
+        elif not all([collected_data.get("name"), collected_data.get("gender"), 
+                     collected_data.get("birthdate"), collected_data.get("city")]):
+            return "collecting_personal_info"
+        elif not all([collected_data.get("employer"), collected_data.get("working_schedule"), 
+                     collected_data.get("holiday_frequency")]):
+            return "collecting_job_details"
+        elif not all([collected_data.get("annual_income"), collected_data.get("monthly_spending")]):
+            return "collecting_financial_info"
+        elif not collected_data.get("holiday_preferences"):
+            return "collecting_holiday_preferences"
+        elif collected_data.get("group_role") == "admin" and not collected_data.get("group_invites_sent"):
+            return "offering_group_invites"
+        else:
+            return "ready_to_complete"
+    
+    def _create_progress_summary(self, collected_data: Dict[str, Any], current_step: str) -> str:
+        """Create a summary of current progress for the agent"""
+        
+        summary = []
+        summary.append("ALREADY COMPLETED:")
+        
+        if collected_data.get("group_code"):
+            summary.append(f"- Group Code: {collected_data['group_code']} (Role: {collected_data.get('group_role', 'unknown')})")
+        
+        if collected_data.get("email"):
+            summary.append(f"- Email: {collected_data['email']}")
+        
+        personal_info = []
+        for field in ["name", "gender", "birthdate", "city"]:
+            if collected_data.get(field):
+                personal_info.append(f"{field}: {collected_data[field]}")
+        if personal_info:
+            summary.append(f"- Personal Info: {', '.join(personal_info)}")
+        
+        job_info = []
+        for field in ["employer", "working_schedule", "holiday_frequency"]:
+            if collected_data.get(field):
+                job_info.append(f"{field}: {collected_data[field]}")
+        if job_info:
+            summary.append(f"- Job Details: {', '.join(job_info)}")
+        
+        financial_info = []
+        for field in ["annual_income", "monthly_spending"]:
+            if collected_data.get(field):
+                financial_info.append(f"{field}: {collected_data[field]}")
+        if financial_info:
+            summary.append(f"- Financial Info: {', '.join(financial_info)}")
+        
+        if collected_data.get("holiday_preferences"):
+            summary.append(f"- Holiday Preferences: {collected_data['holiday_preferences']}")
+        
+        summary.append(f"\nCURRENT STEP: {current_step}")
+        
+        return "\n".join(summary)
     
     def _determine_current_step(self, collected_data: Dict[str, Any]) -> OnboardingStep:
         """Determine current onboarding step based on collected data"""
