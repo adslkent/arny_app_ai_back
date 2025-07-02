@@ -74,6 +74,7 @@ def scan_email_for_profile_tool(email: str) -> dict:
         
         # Store email in collected data
         agent.current_collected_data["email"] = email
+        print(f"📧 Stored email: {email}")
         
         # For now, return empty profile (email scanning would require OAuth setup)
         # In production, this would implement the full OAuth flow
@@ -225,6 +226,15 @@ def skip_group_setup_tool() -> dict:
         
         print("⏭️ Skipping group setup - generating new group code")
         
+        # Check if group setup was already skipped to avoid duplicate processing
+        if agent.current_collected_data.get("group_skipped"):
+            print("⚠️ Group setup already skipped, using existing data")
+            return {
+                "success": True,
+                "group_code": agent.current_collected_data.get("group_code"),
+                "message": "Group setup already completed."
+            }
+        
         # Generate a unique random group code for this user
         try:
             print("🔍 Getting existing group codes...")
@@ -303,7 +313,7 @@ class OnboardingAgent:
                 "   - When the user provides a Group Code, use validate_group_code_tool to check if it exists.\n"
                 "   - If the group EXISTS: They will automatically join it as a member.\n"
                 "   - If the group DOES NOT EXIST: Tell them the group doesn't exist and ask them to check the group code and try again, or type 'skip' to skip group setup for now.\n"
-                "   - If they say 'skip', 'no', 'none', or 'later', use skip_group_setup_tool.\n\n"
+                "   - If they say 'skip', 'no', 'none', or 'later', use skip_group_setup_tool ONLY ONCE.\n\n"
                 "2. EMAIL SCANNING:\n"
                 "   Ask about the user's Gmail or Outlook address, then use scan_email_for_profile_tool "
                 "to fetch name, gender, birthdate, and city. If you successfully extract ANY information (even partial), "
@@ -328,6 +338,7 @@ class OnboardingAgent:
                 "Finally, ONLY when all the above onboarding process is completed, respond: "
                 "'Thank you, this completes your onboarding to Arny!'\n\n"
                 "Always be friendly, conversational, and helpful. Keep track of what information you've already collected to avoid asking the same questions twice. "
+                "DO NOT call the same tool multiple times in one response. "
                 "The first message from the user will be their group code response."
             ),
             model="o4-mini",
