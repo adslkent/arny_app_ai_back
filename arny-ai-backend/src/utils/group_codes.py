@@ -19,8 +19,8 @@ class GroupCodeGenerator:
         """
         # Use uppercase letters and numbers, excluding confusing characters
         chars = string.ascii_uppercase + string.digits
-        # Remove potentially confusing characters
-        chars = chars.replace('0', '').replace('O', '').replace('I', '').replace('1')
+        # Remove potentially confusing characters - FIX: Added missing second argument
+        chars = chars.replace('0', '').replace('O', '').replace('I', '').replace('1', '')
         
         return ''.join(random.choice(chars) for _ in range(length))
     
