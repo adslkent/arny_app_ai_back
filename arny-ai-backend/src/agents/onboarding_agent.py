@@ -5,6 +5,7 @@ import requests
 import email.mime.text
 import re
 import asyncio
+import concurrent.futures
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 from enum import Enum
@@ -28,6 +29,22 @@ def _get_onboarding_agent():
     """Get the current onboarding agent instance"""
     global _current_onboarding_agent
     return _current_onboarding_agent
+
+def _run_async_in_thread(coro):
+    """
+    Run async coroutine in a thread pool to avoid event loop conflicts
+    """
+    def run_in_thread():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+    
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(run_in_thread)
+        return future.result()
 
 # ==================== STANDALONE TOOL FUNCTIONS ====================
 
@@ -121,51 +138,22 @@ def validate_group_code_tool(group_code: str) -> dict:
         if not is_valid:
             return {"valid": False, "exists": False, "message": "Invalid group code format. Group codes should be 4-10 alphanumeric characters. Please check the group code and try again, or type 'skip' to skip group setup for now."}
         
-        # Check if group exists in database (with proper async handling)
-        group_exists = False
+        # Check if group exists in database using thread pool
         try:
-            # First try asyncio.run
-            group_exists = asyncio.run(agent.db.check_group_exists(formatted_code))
-        except RuntimeError as runtime_error:
-            if "event loop is already running" in str(runtime_error).lower():
-                # Handle "This event loop is already running" error
-                try:
-                    loop = asyncio.get_event_loop()
-                    group_exists = loop.run_until_complete(agent.db.check_group_exists(formatted_code))
-                except Exception as loop_error:
-                    print(f"Event loop fallback failed: {str(loop_error)}")
-                    # Return error instead of proceeding with unknown state
-                    return {"valid": False, "error": f"Database connection error: {str(loop_error)}"}
-            else:
-                print(f"RuntimeError in database check: {str(runtime_error)}")
-                return {"valid": False, "error": f"Runtime error: {str(runtime_error)}"}
+            group_exists = _run_async_in_thread(agent.db.check_group_exists(formatted_code))
         except Exception as db_error:
             print(f"Database error checking group existence: {str(db_error)}")
             return {"valid": False, "error": f"Database error: {str(db_error)}"}
         
         if group_exists:
             # Add user to existing group as member
-            member_add_success = False
             try:
-                # First try asyncio.run for adding member
-                member_add_success = asyncio.run(agent.db.add_group_member(formatted_code, agent.current_user_id, "member"))
-            except RuntimeError as runtime_error:
-                if "event loop is already running" in str(runtime_error).lower():
-                    # Handle "This event loop is already running" error
-                    try:
-                        loop = asyncio.get_event_loop()
-                        member_add_success = loop.run_until_complete(agent.db.add_group_member(formatted_code, agent.current_user_id, "member"))
-                    except Exception as loop_error:
-                        print(f"Event loop fallback failed for adding member: {str(loop_error)}")
-                        return {"valid": True, "exists": True, "error": f"Failed to join group: {str(loop_error)}"}
-                else:
-                    print(f"RuntimeError adding user to group: {str(runtime_error)}")
-                    return {"valid": True, "exists": True, "error": f"Runtime error adding to group: {str(runtime_error)}"}
+                success = _run_async_in_thread(agent.db.add_group_member(formatted_code, agent.current_user_id, "member"))
             except Exception as db_error:
-                print(f"Database error adding user to group: {str(db_error)}")
+                print(f"Database error joining group: {str(db_error)}")
                 return {"valid": True, "exists": True, "error": f"Failed to join group: {str(db_error)}"}
             
-            if member_add_success:
+            if success:
                 # Store group info
                 agent.current_collected_data["group_code"] = formatted_code
                 agent.current_collected_data["group_role"] = "member"
@@ -192,8 +180,7 @@ def validate_group_code_tool(group_code: str) -> dict:
             
     except Exception as e:
         print(f"Error in validate_group_code_tool: {str(e)}")
-        # Make sure we don't have any unawaited coroutines in the general exception handler
-        return {"valid": False, "error": f"Validation error: {str(e)}"}
+        return {"valid": False, "error": str(e)}
 
 @function_tool
 def skip_group_setup_tool() -> dict:
@@ -206,65 +193,29 @@ def skip_group_setup_tool() -> dict:
             return {"success": False, "error": "Agent not available"}
         
         # Generate a unique random group code for this user
-        existing_codes = set()
         try:
-            # First try asyncio.run
-            existing_codes = asyncio.run(agent.db.get_existing_group_codes())
-        except RuntimeError as runtime_error:
-            if "event loop is already running" in str(runtime_error).lower():
-                # Handle "This event loop is already running" error
-                try:
-                    loop = asyncio.get_event_loop()
-                    existing_codes = loop.run_until_complete(agent.db.get_existing_group_codes())
-                except Exception as loop_error:
-                    print(f"Event loop fallback failed for getting existing codes: {str(loop_error)}")
-                    # Generate a random code without checking database as fallback
-                    import uuid
-                    fallback_code = str(uuid.uuid4()).replace('-', '').upper()[:8]
-                    existing_codes = {fallback_code}  # Ensure unique by adding to set
-            else:
-                print(f"RuntimeError getting existing codes: {str(runtime_error)}")
-                # Generate a random code without checking database as fallback
-                import uuid
-                fallback_code = str(uuid.uuid4()).replace('-', '').upper()[:8]
-                existing_codes = {fallback_code}  # Ensure unique by adding to set
+            existing_codes = _run_async_in_thread(agent.db.get_existing_group_codes())
         except Exception as db_error:
-            # FIXED: Handle database errors properly without leaving coroutines unawaited
             print(f"Database error getting existing codes: {str(db_error)}")
-            # Generate a random code without checking database as fallback
-            import uuid
-            fallback_code = str(uuid.uuid4()).replace('-', '').upper()[:8]
-            existing_codes = {fallback_code}  # Ensure unique by adding to set
+            return {"success": False, "error": f"Database error getting existing codes: {str(db_error)}"}
         
         new_group_code = agent.group_generator.generate_unique_group_code(existing_codes)
+        print(f"Generated new group code: {new_group_code}")
         
         # Create group in database with user as admin
-        member_add_success = False
         try:
-            # First try asyncio.run
-            member_add_success = asyncio.run(agent.db.add_group_member(new_group_code, agent.current_user_id, "admin"))
-        except RuntimeError as runtime_error:
-            if "event loop is already running" in str(runtime_error).lower():
-                # Handle "This event loop is already running" error
-                try:
-                    loop = asyncio.get_event_loop()
-                    member_add_success = loop.run_until_complete(agent.db.add_group_member(new_group_code, agent.current_user_id, "admin"))
-                except Exception as loop_error:
-                    print(f"Event loop fallback failed for creating group: {str(loop_error)}")
-                    return {"success": False, "error": f"Database error creating group: {str(loop_error)}"}
-            else:
-                print(f"RuntimeError creating group: {str(runtime_error)}")
-                return {"success": False, "error": f"Runtime error creating group: {str(runtime_error)}"}
+            success = _run_async_in_thread(agent.db.add_group_member(new_group_code, agent.current_user_id, "admin"))
         except Exception as db_error:
-            # FIXED: Proper error handling without unawaited coroutines
             print(f"Database error creating group: {str(db_error)}")
             return {"success": False, "error": f"Database error creating group: {str(db_error)}"}
         
-        if member_add_success:
+        if success:
             # Store that user skipped group setup but has a group code (hidden from user)
             agent.current_collected_data["group_code"] = new_group_code
             agent.current_collected_data["group_role"] = "admin"
             agent.current_collected_data["group_skipped"] = True
+            
+            print(f"✅ Successfully created group {new_group_code} for user {agent.current_user_id}")
             
             return {
                 "success": True,
@@ -278,9 +229,10 @@ def skip_group_setup_tool() -> dict:
             }
         
     except Exception as e:
-        # FIXED: Ensure we don't have unawaited coroutines in exception handling
         print(f"Error in skip_group_setup_tool: {str(e)}")
-        return {"success": False, "error": f"Skip group setup error: {str(e)}"}
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
 
 # ==================== ONBOARDING AGENT CLASS ====================
 
@@ -358,6 +310,9 @@ class OnboardingAgent:
             self.current_user_id = user_id
             self.current_collected_data = current_progress.get('collected_data', {})
             
+            print(f"🔧 Processing message for user {user_id}: {message}")
+            print(f"📊 Current collected data: {self.current_collected_data}")
+            
             # Get conversation history
             conversation_history = current_progress.get('conversation_history', [])
             
@@ -369,13 +324,16 @@ class OnboardingAgent:
             # Process with agent
             if not context_messages:
                 # First message
+                print("🚀 Starting new conversation")
                 result = await Runner.run(self.agent, message)
             else:
                 # Continue conversation with context
+                print(f"🔄 Continuing conversation with {len(context_messages)} previous messages")
                 result = await Runner.run(self.agent, context_messages + [{"role": "user", "content": message}])
             
             # Extract response
             assistant_message = result.final_output
+            print(f"🤖 Agent response: {assistant_message}")
             
             # Update conversation history
             conversation_history.append({"role": "user", "content": message})
@@ -394,12 +352,17 @@ class OnboardingAgent:
                 'conversation_history': conversation_history
             }
             
+            print(f"📈 Updated collected data: {self.current_collected_data}")
+            print(f"🏁 Onboarding complete: {onboarding_complete}")
+            
             # Save progress to database
             if not onboarding_complete:
                 current_step = self._determine_current_step(self.current_collected_data)
+                print(f"💾 Saving progress - Current step: {current_step.value}")
                 await self.db.update_onboarding_progress(user_id, current_step, updated_progress)
             else:
                 # Complete onboarding
+                print("🎉 Completing onboarding...")
                 await self.db.complete_onboarding(user_id, self.current_collected_data)
             
             return {
@@ -410,7 +373,9 @@ class OnboardingAgent:
             }
             
         except Exception as e:
-            print(f"Error in onboarding agent: {e}")
+            print(f"❌ Error in onboarding agent: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 "message": "I apologize, but I encountered an error. Could you please try again?",
                 "onboarding_complete": False,
