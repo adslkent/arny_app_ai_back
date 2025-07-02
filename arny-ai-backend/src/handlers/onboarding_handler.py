@@ -90,7 +90,7 @@ class OnboardingHandler:
             if not auth_result.get("success"):
                 return self._error_response(401, "Invalid or expired token")
             
-            # Check if onboarding is already complete
+            # Check if onboarding is already complete - with better error handling
             try:
                 user_status = await self.db.get_user_status(user_id)
                 if user_status and user_status.get('onboarding_completed', False):
@@ -100,14 +100,14 @@ class OnboardingHandler:
                         'redirect_to_main': True
                     })
             except Exception as status_error:
-                print(f"Warning: Could not check user status: {status_error}")
+                print(f"Note: Could not check user status (user may be new): {status_error}")
                 # Continue with onboarding even if status check fails
             
-            # Get user's onboarding progress
+            # Get user's onboarding progress - with better error handling
             try:
                 onboarding_progress = await self.db.get_onboarding_progress(user_id)
             except Exception as progress_error:
-                print(f"Warning: Could not get onboarding progress: {progress_error}")
+                print(f"Note: Could not get onboarding progress (starting fresh): {progress_error}")
                 onboarding_progress = None
             
             # Convert progress to dict format (compatible with LLM-driven agent)
@@ -126,9 +126,12 @@ class OnboardingHandler:
                     progress_data['collected_data'] = stored_data.get('collected_data', {})
                     progress_data['conversation_history'] = stored_data.get('conversation_history', [])
                     progress_data['current_step'] = onboarding_progress.current_step.value
+                    print(f"📥 Loaded existing progress: {len(progress_data['conversation_history'])} messages, {len(progress_data['collected_data'])} data fields")
                 except (json.JSONDecodeError, AttributeError) as parse_error:
                     print(f"Warning: Could not parse progress data: {parse_error}")
                     # Continue with empty progress data
+            else:
+                print("📄 Starting fresh onboarding (no existing progress)")
             
             # Process message with LLM-driven onboarding agent
             try:
