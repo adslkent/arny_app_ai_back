@@ -122,28 +122,50 @@ def validate_group_code_tool(group_code: str) -> dict:
             return {"valid": False, "exists": False, "message": "Invalid group code format. Group codes should be 4-10 alphanumeric characters. Please check the group code and try again, or type 'skip' to skip group setup for now."}
         
         # Check if group exists in database (with proper async handling)
+        group_exists = False
         try:
+            # First try asyncio.run
             group_exists = asyncio.run(agent.db.check_group_exists(formatted_code))
-        except RuntimeError:
-            # Handle "asyncio.run() cannot be called from a running event loop" error
-            loop = asyncio.get_event_loop()
-            group_exists = loop.run_until_complete(agent.db.check_group_exists(formatted_code))
+        except RuntimeError as runtime_error:
+            if "event loop is already running" in str(runtime_error).lower():
+                # Handle "This event loop is already running" error
+                try:
+                    loop = asyncio.get_event_loop()
+                    group_exists = loop.run_until_complete(agent.db.check_group_exists(formatted_code))
+                except Exception as loop_error:
+                    print(f"Event loop fallback failed: {str(loop_error)}")
+                    # Return error instead of proceeding with unknown state
+                    return {"valid": False, "error": f"Database connection error: {str(loop_error)}"}
+            else:
+                print(f"RuntimeError in database check: {str(runtime_error)}")
+                return {"valid": False, "error": f"Runtime error: {str(runtime_error)}"}
         except Exception as db_error:
             print(f"Database error checking group existence: {str(db_error)}")
             return {"valid": False, "error": f"Database error: {str(db_error)}"}
         
         if group_exists:
             # Add user to existing group as member
+            member_add_success = False
             try:
-                success = asyncio.run(agent.db.add_group_member(formatted_code, agent.current_user_id, "member"))
-            except RuntimeError:
-                loop = asyncio.get_event_loop()
-                success = loop.run_until_complete(agent.db.add_group_member(formatted_code, agent.current_user_id, "member"))
+                # First try asyncio.run for adding member
+                member_add_success = asyncio.run(agent.db.add_group_member(formatted_code, agent.current_user_id, "member"))
+            except RuntimeError as runtime_error:
+                if "event loop is already running" in str(runtime_error).lower():
+                    # Handle "This event loop is already running" error
+                    try:
+                        loop = asyncio.get_event_loop()
+                        member_add_success = loop.run_until_complete(agent.db.add_group_member(formatted_code, agent.current_user_id, "member"))
+                    except Exception as loop_error:
+                        print(f"Event loop fallback failed for adding member: {str(loop_error)}")
+                        return {"valid": True, "exists": True, "error": f"Failed to join group: {str(loop_error)}"}
+                else:
+                    print(f"RuntimeError adding user to group: {str(runtime_error)}")
+                    return {"valid": True, "exists": True, "error": f"Runtime error adding to group: {str(runtime_error)}"}
             except Exception as db_error:
                 print(f"Database error adding user to group: {str(db_error)}")
                 return {"valid": True, "exists": True, "error": f"Failed to join group: {str(db_error)}"}
             
-            if success:
+            if member_add_success:
                 # Store group info
                 agent.current_collected_data["group_code"] = formatted_code
                 agent.current_collected_data["group_role"] = "member"
@@ -170,7 +192,8 @@ def validate_group_code_tool(group_code: str) -> dict:
             
     except Exception as e:
         print(f"Error in validate_group_code_tool: {str(e)}")
-        return {"valid": False, "error": str(e)}
+        # Make sure we don't have any unawaited coroutines in the general exception handler
+        return {"valid": False, "error": f"Validation error: {str(e)}"}
 
 @function_tool
 def skip_group_setup_tool() -> dict:
@@ -183,12 +206,28 @@ def skip_group_setup_tool() -> dict:
             return {"success": False, "error": "Agent not available"}
         
         # Generate a unique random group code for this user
+        existing_codes = set()
         try:
+            # First try asyncio.run
             existing_codes = asyncio.run(agent.db.get_existing_group_codes())
-        except RuntimeError:
-            # Handle "asyncio.run() cannot be called from a running event loop" error
-            loop = asyncio.get_event_loop()
-            existing_codes = loop.run_until_complete(agent.db.get_existing_group_codes())
+        except RuntimeError as runtime_error:
+            if "event loop is already running" in str(runtime_error).lower():
+                # Handle "This event loop is already running" error
+                try:
+                    loop = asyncio.get_event_loop()
+                    existing_codes = loop.run_until_complete(agent.db.get_existing_group_codes())
+                except Exception as loop_error:
+                    print(f"Event loop fallback failed for getting existing codes: {str(loop_error)}")
+                    # Generate a random code without checking database as fallback
+                    import uuid
+                    fallback_code = str(uuid.uuid4()).replace('-', '').upper()[:8]
+                    existing_codes = {fallback_code}  # Ensure unique by adding to set
+            else:
+                print(f"RuntimeError getting existing codes: {str(runtime_error)}")
+                # Generate a random code without checking database as fallback
+                import uuid
+                fallback_code = str(uuid.uuid4()).replace('-', '').upper()[:8]
+                existing_codes = {fallback_code}  # Ensure unique by adding to set
         except Exception as db_error:
             # FIXED: Handle database errors properly without leaving coroutines unawaited
             print(f"Database error getting existing codes: {str(db_error)}")
@@ -200,17 +239,28 @@ def skip_group_setup_tool() -> dict:
         new_group_code = agent.group_generator.generate_unique_group_code(existing_codes)
         
         # Create group in database with user as admin
+        member_add_success = False
         try:
-            success = asyncio.run(agent.db.add_group_member(new_group_code, agent.current_user_id, "admin"))
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-            success = loop.run_until_complete(agent.db.add_group_member(new_group_code, agent.current_user_id, "admin"))
+            # First try asyncio.run
+            member_add_success = asyncio.run(agent.db.add_group_member(new_group_code, agent.current_user_id, "admin"))
+        except RuntimeError as runtime_error:
+            if "event loop is already running" in str(runtime_error).lower():
+                # Handle "This event loop is already running" error
+                try:
+                    loop = asyncio.get_event_loop()
+                    member_add_success = loop.run_until_complete(agent.db.add_group_member(new_group_code, agent.current_user_id, "admin"))
+                except Exception as loop_error:
+                    print(f"Event loop fallback failed for creating group: {str(loop_error)}")
+                    return {"success": False, "error": f"Database error creating group: {str(loop_error)}"}
+            else:
+                print(f"RuntimeError creating group: {str(runtime_error)}")
+                return {"success": False, "error": f"Runtime error creating group: {str(runtime_error)}"}
         except Exception as db_error:
             # FIXED: Proper error handling without unawaited coroutines
             print(f"Database error creating group: {str(db_error)}")
             return {"success": False, "error": f"Database error creating group: {str(db_error)}"}
         
-        if success:
+        if member_add_success:
             # Store that user skipped group setup but has a group code (hidden from user)
             agent.current_collected_data["group_code"] = new_group_code
             agent.current_collected_data["group_role"] = "admin"
@@ -230,7 +280,7 @@ def skip_group_setup_tool() -> dict:
     except Exception as e:
         # FIXED: Ensure we don't have unawaited coroutines in exception handling
         print(f"Error in skip_group_setup_tool: {str(e)}")
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": f"Skip group setup error: {str(e)}"}
 
 # ==================== ONBOARDING AGENT CLASS ====================
 
