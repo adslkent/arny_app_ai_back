@@ -121,12 +121,26 @@ def validate_group_code_tool(group_code: str) -> dict:
         if not is_valid:
             return {"valid": False, "exists": False, "message": "Invalid group code format. Group codes should be 4-10 alphanumeric characters. Please check the group code and try again, or type 'skip' to skip group setup for now."}
         
-        # Check if group exists in database
-        group_exists = asyncio.run(agent.db.check_group_exists(formatted_code))
+        # Check if group exists in database (with proper async handling)
+        try:
+            group_exists = asyncio.run(agent.db.check_group_exists(formatted_code))
+        except RuntimeError as re:
+            # Handle "asyncio.run() cannot be called from a running event loop" error
+            import asyncio
+            loop = asyncio.get_event_loop()
+            group_exists = loop.run_until_complete(agent.db.check_group_exists(formatted_code))
+        except Exception as db_error:
+            return {"valid": False, "error": f"Database error: {str(db_error)}"}
         
         if group_exists:
             # Add user to existing group as member
-            success = asyncio.run(agent.db.add_group_member(formatted_code, agent.current_user_id, "member"))
+            try:
+                success = asyncio.run(agent.db.add_group_member(formatted_code, agent.current_user_id, "member"))
+            except RuntimeError:
+                loop = asyncio.get_event_loop()
+                success = loop.run_until_complete(agent.db.add_group_member(formatted_code, agent.current_user_id, "member"))
+            except Exception as db_error:
+                return {"valid": True, "exists": True, "error": f"Failed to join group: {str(db_error)}"}
             
             if success:
                 # Store group info
@@ -167,11 +181,24 @@ def skip_group_setup_tool() -> dict:
             return {"success": False, "error": "Agent not available"}
         
         # Generate a unique random group code for this user
-        existing_codes = asyncio.run(agent.db.get_existing_group_codes())
+        try:
+            existing_codes = asyncio.run(agent.db.get_existing_group_codes())
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            existing_codes = loop.run_until_complete(agent.db.get_existing_group_codes())
+        except Exception as db_error:
+            return {"success": False, "error": f"Database error getting existing codes: {str(db_error)}"}
+        
         new_group_code = agent.group_generator.generate_unique_group_code(existing_codes)
         
         # Create group in database with user as admin
-        success = asyncio.run(agent.db.add_group_member(new_group_code, agent.current_user_id, "admin"))
+        try:
+            success = asyncio.run(agent.db.add_group_member(new_group_code, agent.current_user_id, "admin"))
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            success = loop.run_until_complete(agent.db.add_group_member(new_group_code, agent.current_user_id, "admin"))
+        except Exception as db_error:
+            return {"success": False, "error": f"Database error creating group: {str(db_error)}"}
         
         if success:
             # Store that user skipped group setup but has a group code (hidden from user)
