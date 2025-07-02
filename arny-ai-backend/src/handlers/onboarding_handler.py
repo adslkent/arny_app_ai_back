@@ -9,7 +9,12 @@ from ..auth.supabase_auth import SupabaseAuth
 
 class OnboardingHandler:
     """
-    Handler for LLM-driven onboarding conversation flow
+    Handler for LLM-driven onboarding conversation flow - FIXED VERSION
+    
+    Fixed Issues:
+    1. Better error handling for database operations
+    2. Proper loading of existing onboarding progress
+    3. Improved session continuity
     """
     
     def __init__(self):
@@ -50,7 +55,7 @@ class OnboardingHandler:
     
     async def handle_request(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
-        Handle onboarding conversation requests
+        Handle onboarding conversation requests - FIXED VERSION
         
         Args:
             event: Lambda event containing request data
@@ -94,6 +99,7 @@ class OnboardingHandler:
             try:
                 user_status = await self.db.get_user_status(user_id)
                 if user_status and user_status.get('onboarding_completed', False):
+                    print(f"✅ User {user_id} onboarding already complete")
                     return self._success_response({
                         'response': 'Your onboarding is already complete! You can now use Arny to plan your travels.',
                         'onboarding_complete': True,
@@ -103,44 +109,60 @@ class OnboardingHandler:
                 print(f"Note: Could not check user status (user may be new): {status_error}")
                 # Continue with onboarding even if status check fails
             
-            # Get user's onboarding progress - with better error handling
-            try:
-                onboarding_progress = await self.db.get_onboarding_progress(user_id)
-            except Exception as progress_error:
-                print(f"Note: Could not get onboarding progress (starting fresh): {progress_error}")
-                onboarding_progress = None
-            
-            # Convert progress to dict format (compatible with LLM-driven agent)
+            # Get user's onboarding progress - with better error handling and proper loading
             progress_data = {
                 'collected_data': {},
                 'conversation_history': []
             }
             
-            if onboarding_progress:
-                # Extract conversation history and collected data from stored progress
-                try:
-                    stored_data = onboarding_progress.collected_data or {}
-                    if isinstance(stored_data, str):
-                        stored_data = json.loads(stored_data)
+            try:
+                onboarding_progress = await self.db.get_onboarding_progress(user_id)
+                
+                if onboarding_progress:
+                    print(f"📥 Found existing onboarding progress for user {user_id}")
                     
-                    progress_data['collected_data'] = stored_data.get('collected_data', {})
-                    progress_data['conversation_history'] = stored_data.get('conversation_history', [])
-                    progress_data['current_step'] = onboarding_progress.current_step.value
-                    print(f"📥 Loaded existing progress: {len(progress_data['conversation_history'])} messages, {len(progress_data['collected_data'])} data fields")
-                except (json.JSONDecodeError, AttributeError) as parse_error:
-                    print(f"Warning: Could not parse progress data: {parse_error}")
-                    # Continue with empty progress data
-            else:
-                print("📄 Starting fresh onboarding (no existing progress)")
+                    # Extract conversation history and collected data from stored progress
+                    try:
+                        stored_data = onboarding_progress.collected_data or {}
+                        if isinstance(stored_data, str):
+                            stored_data = json.loads(stored_data)
+                        
+                        # Properly extract the nested structure
+                        if isinstance(stored_data, dict):
+                            progress_data['collected_data'] = stored_data.get('collected_data', {})
+                            progress_data['conversation_history'] = stored_data.get('conversation_history', [])
+                            progress_data['current_step'] = onboarding_progress.current_step.value
+                            
+                            print(f"📊 Loaded progress: {len(progress_data['conversation_history'])} messages, {len(progress_data['collected_data'])} data fields")
+                            print(f"🎯 Current step: {progress_data.get('current_step', 'unknown')}")
+                            print(f"📋 Collected data keys: {list(progress_data['collected_data'].keys())}")
+                        else:
+                            print("⚠️  Stored data is not in expected format, starting fresh")
+                            
+                    except (json.JSONDecodeError, AttributeError) as parse_error:
+                        print(f"Warning: Could not parse progress data: {parse_error}")
+                        # Continue with empty progress data
+                else:
+                    print(f"📄 No existing progress found for user {user_id}, starting fresh")
+                    
+            except Exception as progress_error:
+                print(f"Note: Could not get onboarding progress (starting fresh): {progress_error}")
+                # Continue with empty progress data
             
             # Process message with LLM-driven onboarding agent
             try:
+                print(f"🤖 Processing message with agent: '{message}'")
+                print(f"📊 Passing collected data: {progress_data['collected_data']}")
+                
                 agent_response = await self.onboarding_agent.process_message(
                     user_id=user_id,
                     message=message,
                     session_id=session_id,
                     current_progress=progress_data
                 )
+                
+                print(f"✅ Agent response received: {agent_response.get('message', '')[:100]}...")
+                
             except Exception as agent_error:
                 print(f"Error in onboarding agent: {agent_error}")
                 import traceback
@@ -149,6 +171,7 @@ class OnboardingHandler:
             
             # Check if onboarding is complete
             if agent_response.get('onboarding_complete', False):
+                print(f"🎉 Onboarding completed for user {user_id}")
                 return self._success_response({
                     'response': agent_response.get('message'),
                     'onboarding_complete': True,
@@ -157,15 +180,22 @@ class OnboardingHandler:
                     'session_id': session_id
                 })
             else:
+                print(f"🔄 Onboarding continuing for user {user_id}")
+                collected_data = agent_response.get('collected_data', {})
+                conversation_context = agent_response.get('progress_data', {}).get('conversation_history', [])
+                
+                print(f"📈 Updated collected data: {list(collected_data.keys())}")
+                print(f"💬 Conversation length: {len(conversation_context)}")
+                
                 return self._success_response({
                     'response': agent_response.get('message'),
                     'onboarding_complete': False,
-                    'collected_data': agent_response.get('collected_data', {}),
+                    'collected_data': collected_data,
                     'session_id': session_id,
                     'agent_status': 'continuing',
                     'conversation_context': {
-                        'messages_count': len(agent_response.get('progress_data', {}).get('conversation_history', [])),
-                        'data_collected': list(agent_response.get('collected_data', {}).keys())
+                        'messages_count': len(conversation_context),
+                        'data_collected': list(collected_data.keys())
                     }
                 })
             
