@@ -17,6 +17,37 @@ class OnboardingHandler:
         self.auth = SupabaseAuth()
         self.onboarding_agent = OnboardingAgent()
     
+    def _validate_user_id(self, user_id: str) -> tuple[bool, str]:
+        """
+        Enhanced user ID validation with better error handling
+        
+        Args:
+            user_id: User ID to validate
+            
+        Returns:
+            Tuple of (is_valid, cleaned_user_id or error_message)
+        """
+        if not user_id:
+            return False, "User ID cannot be empty"
+        
+        try:
+            # Convert to string and strip whitespace
+            user_id_str = str(user_id).strip()
+            
+            # Remove any quotes that might be present
+            user_id_str = user_id_str.strip('"\'')
+            
+            # Validate UUID format
+            uuid_obj = uuid.UUID(user_id_str)
+            
+            # Return the string representation to ensure consistency
+            return True, str(uuid_obj)
+            
+        except ValueError as e:
+            return False, f"Invalid UUID format: {e}"
+        except Exception as e:
+            return False, f"Unexpected validation error: {e}"
+    
     async def handle_request(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
         Handle onboarding conversation requests
@@ -34,47 +65,25 @@ class OnboardingHandler:
             body = json.loads(event.get('body', '{}'))
             
             # Extract key information
-            user_id = body.get('user_id')
+            raw_user_id = body.get('user_id')
             message = body.get('message')
             session_id = body.get('session_id', str(uuid.uuid4()))
             access_token = body.get('access_token')
             
-            if not user_id or not message:
+            if not raw_user_id or not message:
                 return self._error_response(400, "Missing user_id or message")
             
             if not access_token:
                 return self._error_response(401, "Missing access_token")
             
-            # ENHANCED UUID validation with better error handling
-            try:
-                # Strip whitespace and validate UUID format
-                user_id = str(user_id).strip()
-                
-                # More robust UUID validation
-                if not user_id:
-                    raise ValueError("user_id is empty after stripping")
-                
-                # Check if it looks like a UUID (basic format check first)
-                if len(user_id) != 36:
-                    raise ValueError(f"user_id length is {len(user_id)}, expected 36")
-                
-                if user_id.count('-') != 4:
-                    raise ValueError(f"user_id has {user_id.count('-')} dashes, expected 4")
-                
-                # Now try the actual UUID validation
-                uuid_obj = uuid.UUID(user_id)
-                
-                # Ensure the string representation matches (handles case issues)
-                user_id = str(uuid_obj)
-                
-                print(f"✅ UUID validation passed for user_id: {user_id}")
-                
-            except (ValueError, TypeError) as e:
-                print(f"❌ UUID validation error for user_id '{user_id}': {e}")
-                print(f"   Raw user_id type: {type(body.get('user_id'))}")
-                print(f"   Raw user_id value: '{body.get('user_id')}'")
-                print(f"   Processed user_id: '{user_id}'")
-                return self._error_response(400, f"Invalid user_id format: {user_id}")
+            # Enhanced user_id validation
+            is_valid, user_id_or_error = self._validate_user_id(raw_user_id)
+            if not is_valid:
+                print(f"UUID validation failed for '{raw_user_id}': {user_id_or_error}")
+                return self._error_response(400, f"Invalid user_id: {user_id_or_error}")
+            
+            user_id = user_id_or_error  # Now contains the cleaned user_id
+            print(f"✅ User ID validated: {user_id}")
             
             # Verify user authentication
             auth_result = await self.auth.verify_token(access_token)
@@ -91,14 +100,14 @@ class OnboardingHandler:
                         'redirect_to_main': True
                     })
             except Exception as status_error:
-                print(f"⚠️  Warning: Could not check user status: {status_error}")
+                print(f"Warning: Could not check user status: {status_error}")
                 # Continue with onboarding even if status check fails
             
             # Get user's onboarding progress
             try:
                 onboarding_progress = await self.db.get_onboarding_progress(user_id)
             except Exception as progress_error:
-                print(f"⚠️  Warning: Could not get onboarding progress: {progress_error}")
+                print(f"Warning: Could not get onboarding progress: {progress_error}")
                 onboarding_progress = None
             
             # Convert progress to dict format (compatible with LLM-driven agent)
@@ -118,7 +127,7 @@ class OnboardingHandler:
                     progress_data['conversation_history'] = stored_data.get('conversation_history', [])
                     progress_data['current_step'] = onboarding_progress.current_step.value
                 except (json.JSONDecodeError, AttributeError) as parse_error:
-                    print(f"⚠️  Warning: Could not parse progress data: {parse_error}")
+                    print(f"Warning: Could not parse progress data: {parse_error}")
                     # Continue with empty progress data
             
             # Process message with LLM-driven onboarding agent
@@ -130,7 +139,7 @@ class OnboardingHandler:
                     current_progress=progress_data
                 )
             except Exception as agent_error:
-                print(f"❌ Error in onboarding agent: {agent_error}")
+                print(f"Error in onboarding agent: {agent_error}")
                 import traceback
                 traceback.print_exc()
                 return self._error_response(500, f"Onboarding agent error: {str(agent_error)}")
@@ -158,7 +167,7 @@ class OnboardingHandler:
                 })
             
         except Exception as e:
-            print(f"❌ Error in onboarding handler: {str(e)}")
+            print(f"Error in onboarding handler: {str(e)}")
             import traceback
             traceback.print_exc()
             return self._error_response(500, "Internal server error")
@@ -243,21 +252,21 @@ class OnboardingHandler:
         
         try:
             body = json.loads(event.get('body', '{}'))
-            user_id = body.get('user_id')
+            raw_user_id = body.get('user_id')
             access_token = body.get('access_token')
             
-            if not user_id:
+            if not raw_user_id:
                 return self._error_response(400, "Missing user_id")
             
             if not access_token:
                 return self._error_response(401, "Missing access_token")
             
-            # Validate user_id format
-            try:
-                user_id = str(user_id).strip()
-                uuid.UUID(user_id)
-            except (ValueError, TypeError):
-                return self._error_response(400, f"Invalid user_id format: {user_id}")
+            # Enhanced user_id validation
+            is_valid, user_id_or_error = self._validate_user_id(raw_user_id)
+            if not is_valid:
+                return self._error_response(400, f"Invalid user_id: {user_id_or_error}")
+            
+            user_id = user_id_or_error
             
             # Verify authentication
             auth_result = await self.auth.verify_token(access_token)
@@ -300,22 +309,22 @@ class OnboardingHandler:
         
         try:
             body = json.loads(event.get('body', '{}'))
-            user_id = body.get('user_id')
+            raw_user_id = body.get('user_id')
             group_code = body.get('group_code')
             access_token = body.get('access_token')
             
-            if not user_id or not group_code:
+            if not raw_user_id or not group_code:
                 return self._error_response(400, "Missing user_id or group_code")
             
             if not access_token:
                 return self._error_response(401, "Missing access_token")
             
-            # Validate user_id format
-            try:
-                user_id = str(user_id).strip()
-                uuid.UUID(user_id)
-            except (ValueError, TypeError):
-                return self._error_response(400, f"Invalid user_id format: {user_id}")
+            # Enhanced user_id validation
+            is_valid, user_id_or_error = self._validate_user_id(raw_user_id)
+            if not is_valid:
+                return self._error_response(400, f"Invalid user_id: {user_id_or_error}")
+            
+            user_id = user_id_or_error
             
             # Verify authentication
             auth_result = await self.auth.verify_token(access_token)
@@ -367,21 +376,21 @@ class OnboardingHandler:
         
         try:
             body = json.loads(event.get('body', '{}'))
-            user_id = body.get('user_id')
+            raw_user_id = body.get('user_id')
             access_token = body.get('access_token')
             
-            if not user_id:
+            if not raw_user_id:
                 return self._error_response(400, "Missing user_id")
             
             if not access_token:
                 return self._error_response(401, "Missing access_token")
             
-            # Validate user_id format
-            try:
-                user_id = str(user_id).strip()
-                uuid.UUID(user_id)
-            except (ValueError, TypeError):
-                return self._error_response(400, f"Invalid user_id format: {user_id}")
+            # Enhanced user_id validation
+            is_valid, user_id_or_error = self._validate_user_id(raw_user_id)
+            if not is_valid:
+                return self._error_response(400, f"Invalid user_id: {user_id_or_error}")
+            
+            user_id = user_id_or_error
             
             # Verify authentication
             auth_result = await self.auth.verify_token(access_token)
