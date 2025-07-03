@@ -237,6 +237,17 @@ def search_flights_tool(origin: str, destination: str, departure_date: str,
         print(f"💾 Saving search to database...")
         _run_async_safely(agent.db.save_flight_search(flight_search))
         
+        # FIXED: Store search results and ID on agent instance for access in response
+        agent.latest_search_results = filtering_result["filtered_results"]
+        agent.latest_search_id = flight_search.search_id
+        agent.latest_filtering_info = {
+            "original_count": filtering_result["original_count"],
+            "filtered_count": filtering_result["filtered_count"],
+            "filtering_applied": filtering_result["filtering_applied"],
+            "group_size": filtering_result.get("group_size", 1),
+            "rationale": filtering_result["rationale"]
+        }
+        
         # Format results for presentation
         formatted_results = agent._format_flight_results_for_agent(
             filtering_result["filtered_results"], 
@@ -435,6 +446,11 @@ class FlightAgent:
         self.current_session_id = None
         self.user_profile = None
         
+        # FIXED: Add attributes to store latest search results for response
+        self.latest_search_results = []
+        self.latest_search_id = None
+        self.latest_filtering_info = {}
+        
         # Store this instance globally for tool access
         _current_flight_agent = self
         
@@ -459,6 +475,11 @@ class FlightAgent:
         
         try:
             print(f"✈️ FlightAgent processing message: '{message[:50]}...'")
+            
+            # FIXED: Clear previous search results at start of new message
+            self.latest_search_results = []
+            self.latest_search_id = None
+            self.latest_filtering_info = {}
             
             # FIXED: Store context for tool calls on the current instance
             self.current_user_id = user_id
@@ -500,10 +521,14 @@ class FlightAgent:
             
             print(f"✅ FlightAgent response generated: '{assistant_message[:50]}...'")
             
+            # FIXED: Include search results and search ID in response
             return {
                 "message": assistant_message,
                 "agent_type": "flight",
                 "requires_action": False,  # Will be set to True if flight selection is needed
+                "search_results": self.latest_search_results,
+                "search_id": self.latest_search_id,
+                "filtering_info": self.latest_filtering_info,
                 "metadata": {
                     "agent_type": "flight",
                     "conversation_type": "flight_search"
@@ -518,7 +543,10 @@ class FlightAgent:
                 "message": "I'm sorry, I encountered an error while searching for flights. Please try again.",
                 "agent_type": "flight",
                 "error": str(e),
-                "requires_action": False
+                "requires_action": False,
+                "search_results": [],
+                "search_id": None,
+                "filtering_info": {}
             }
     
     # ==================== HELPER METHODS ====================
