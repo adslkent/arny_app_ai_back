@@ -231,8 +231,7 @@ def skip_group_setup_tool() -> dict:
             print("⚠️ Group setup already skipped, using existing data")
             return {
                 "success": True,
-                "group_code": agent.current_collected_data.get("group_code"),
-                "message": "Group setup already completed."
+                "message": "Group setup skipped. You can always invite family or friends later."
             }
         
         # Generate a unique random group code for this user
@@ -267,9 +266,9 @@ def skip_group_setup_tool() -> dict:
             print(f"📈 Updated collected data: {agent.current_collected_data}")
             print(f"🎉 Successfully created group {new_group_code} for user {agent.current_user_id}")
             
+            # FIXED: Don't mention the specific group code to the user
             return {
                 "success": True,
-                "group_code": new_group_code,  # This is stored but not shown to user
                 "message": "Group setup skipped. You can always invite family or friends later."
             }
         else:
@@ -294,6 +293,7 @@ class OnboardingAgent:
     1. Proper conversation state management
     2. Better progress tracking and continuation
     3. Improved step detection and flow control
+    4. Hidden group code when skipping group setup
     """
     
     def __init__(self):
@@ -319,7 +319,8 @@ class OnboardingAgent:
                 "   - When the user provides a Group Code, use validate_group_code_tool to check if it exists.\n"
                 "   - If the group EXISTS: They will automatically join it as a member.\n"
                 "   - If the group DOES NOT EXIST: Tell them the group doesn't exist and ask them to check the group code and try again, or type 'skip' to skip group setup for now.\n"
-                "   - If they say 'skip', 'no', 'none', or 'later', use skip_group_setup_tool ONLY ONCE.\n\n"
+                "   - If they say 'skip', 'no', 'none', or 'later', use skip_group_setup_tool ONLY ONCE.\n"
+                "   - IMPORTANT: When a user skips group setup, NEVER mention any specific group code to them. Just say that group setup has been skipped and they can invite people later.\n\n"
                 "2. EMAIL SCANNING:\n"
                 "   Ask about the user's Gmail or Outlook address, then use scan_email_for_profile_tool "
                 "to fetch name, gender, birthdate, and city. If you successfully extract ANY information (even partial), "
@@ -345,7 +346,8 @@ class OnboardingAgent:
                 "'Thank you, this completes your onboarding to Arny!'\n\n"
                 "Always be friendly, conversational, and helpful. Keep track of what information you've already collected to avoid asking the same questions twice. "
                 "DO NOT call the same tool multiple times in one response. "
-                "CONTINUE FROM WHERE THE CONVERSATION LEFT OFF - check collected data to see what step to proceed with."
+                "CONTINUE FROM WHERE THE CONVERSATION LEFT OFF - check collected data to see what step to proceed with. "
+                "NEVER reveal specific group codes to users when they skip group setup."
             ),
             model="o4-mini",
             tools=[
@@ -483,7 +485,7 @@ class OnboardingAgent:
         summary.append("ALREADY COMPLETED:")
         
         if collected_data.get("group_code"):
-            summary.append(f"- Group Code: {collected_data['group_code']} (Role: {collected_data.get('group_role', 'unknown')})")
+            summary.append(f"- Group Setup: Completed (Role: {collected_data.get('group_role', 'unknown')})")
         
         if collected_data.get("email"):
             summary.append(f"- Email: {collected_data['email']}")
