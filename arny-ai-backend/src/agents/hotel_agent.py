@@ -96,6 +96,13 @@ BOARD_TYPE_MAPPING = {
     "all inclusive": "ALL_INCLUSIVE",
 }
 
+# Global variable to store the current agent instance
+_current_hotel_agent = None
+
+def _get_hotel_agent():
+    """Get the current hotel agent instance"""
+    global _current_hotel_agent
+    return _current_hotel_agent
 
 def get_hotel_system_message(hotel_mapping: Dict[str, List[str]] = None, city_mapping: Dict[str, str] = None) -> str:
     """
@@ -204,25 +211,383 @@ Please say "Hotel search completed" after completing the task.
 """
     return system_message
 
+
+@function_tool
+async def search_hotels_tool(destination: str, check_in_date: str, check_out_date: Optional[str] = None,
+                            adults: int = 1, rooms: int = 1, price_range: Optional[str] = None,
+                            currency: Optional[str] = None, board_type: Optional[str] = None) -> dict:
+    """
+    Search for hotels using Amadeus API with group profile filtering
+    
+    Args:
+        destination: Destination city or city code (e.g., 'Sydney', 'SYD')
+        check_in_date: Check-in date in YYYY-MM-DD format
+        check_out_date: Check-out date in YYYY-MM-DD format, defaults to one day after check-in
+        adults: Number of adults (default 1)
+        rooms: Number of rooms (default 1)
+        price_range: Price range, e.g., '100-200'
+        currency: Currency code, e.g., 'USD' or 'EUR'
+        board_type: Board type, options: ROOM_ONLY, BREAKFAST, HALF_BOARD, FULL_BOARD, ALL_INCLUSIVE
+    
+    Returns:
+        Dict with hotel search results and profile filtering information
+    """
+    
+    # ---------------------------------------------------------------------
+    # DEBUG LOGGING
+    # ---------------------------------------------------------------------
+    print("[DEBUG] search_hotels_tool called with:", {
+        "destination": destination,
+        "check_in_date": check_in_date,
+        "check_out_date": check_out_date,
+        "adults": adults,
+        "rooms": rooms,
+        "price_range": price_range,
+        "currency": currency,
+        "board_type": board_type,
+    })
+    
+    try:
+        hotel_agent = _get_hotel_agent()
+        if not hotel_agent:
+            return {"success": False, "error": "Hotel agent not available"}
+        
+        # FIXED: Check if context is properly set
+        if not hasattr(hotel_agent, 'current_user_id') or not hotel_agent.current_user_id:
+            return {"success": False, "error": "User context not available"}
+        
+        print(f"🔍 Search hotels tool called with: {destination} for {check_in_date} to {check_out_date}")
+        
+        # Convert city names to city codes if needed
+        city_code = hotel_agent._convert_to_city_code(destination)
+        
+        # Handle board type mapping
+        board_type_processed = None
+        if board_type:
+            board_type_processed = BOARD_TYPE_MAPPING.get(board_type.lower(), board_type)
+            logger.info(f"Board type processed: {board_type} -> {board_type_processed}")
+        
+        # Handle default check-out date (one day after check-in)
+        if not check_out_date:
+            try:
+                check_in_dt = datetime.strptime(check_in_date, "%Y-%m-%d")
+                check_out_dt = check_in_dt + timedelta(days=1)
+                check_out_date = check_out_dt.strftime("%Y-%m-%d")
+                logger.info(f"Auto-generated check_out_date: {check_out_date}")
+            except ValueError:
+                return {
+                    "success": False,
+                    "error": "Invalid check_in_date format",
+                    "message": "Please provide check-in date in YYYY-MM-DD format"
+                }
+        
+        print(f"✅ Converted codes: {destination} → {city_code}")
+        
+        # Perform hotel search
+        print(f"🏨 Calling Amadeus API...")
+        search_results = await hotel_agent.amadeus_service.search_hotels(
+            city_code=city_code,
+            check_in_date=check_in_date,
+            check_out_date=check_out_date,
+            adults=adults,
+            rooms=rooms,
+            max_results=15  # Get more results for better filtering
+        )
+        
+        print(f"📊 Amadeus API response: success={search_results.get('success')}, results={len(search_results.get('results', []))}")
+        
+        if not search_results.get("success"):
+            print(f"❌ Amadeus API error: {search_results.get('error')}")
+            return {
+                "success": False,
+                "error": search_results.get("error", "Hotel search failed"),
+                "message": f"Sorry, I couldn't find hotels in {destination} for {check_in_date} to {check_out_date}. Please check your dates and destination."
+            }
+        
+        # Apply profile-based filtering
+        search_params = {
+            "city_code": city_code,
+            "destination": destination,
+            "check_in_date": check_in_date,
+            "check_out_date": check_out_date,
+            "adults": adults,
+            "rooms": rooms
+        }
+        
+        print(f"🔧 Applying profile filtering...")
+        # Filter results based on group profiles
+        filtering_result = await hotel_agent.profile_agent.filter_hotel_results(
+            user_id=hotel_agent.current_user_id,
+            hotel_results=search_results["results"],
+            search_params=search_params
+        )
+        
+        print(f"✅ Filtering complete: {filtering_result['filtered_count']} of {filtering_result['original_count']} results")
+        
+        # Save search to database (save original results for analytics)
+        hotel_search = HotelSearch(
+            id=str(uuid.uuid4()),
+            user_id=hotel_agent.current_user_id,
+            city_code=city_code,
+            check_in_date=check_in_date,
+            check_out_date=check_out_date,
+            adults=adults,
+            rooms=rooms,
+            search_results=search_results["results"],  # Save original results
+            result_count=len(filtering_result["filtered_results"]),
+            search_successful=True
+        )
+        
+        print(f"💾 Saving search to database...")
+        await hotel_agent.db.save_hotel_search(hotel_search)
+        
+        # FIXED: Store search results and ID on agent instance for access in response
+        hotel_agent.latest_search_results = filtering_result["filtered_results"]
+        hotel_agent.latest_search_id = hotel_search.id
+        hotel_agent.latest_filtering_info = {
+            "original_count": filtering_result["original_count"],
+            "filtered_count": filtering_result["filtered_count"],
+            "filtering_applied": filtering_result["filtering_applied"],
+            "group_size": filtering_result.get("group_size", 1),
+            "rationale": filtering_result["rationale"]
+        }
+        
+        # Format results for presentation
+        formatted_results = hotel_agent._format_hotel_results_for_agent(
+            filtering_result["filtered_results"], 
+            destination,
+            check_in_date, 
+            check_out_date,
+            filtering_result
+        )
+        
+        result_payload = {
+            "success": True,
+            "results": filtering_result["filtered_results"],
+            "formatted_results": formatted_results,
+            "search_id": hotel_search.id,
+            "search_params": search_params,
+            "filtering_info": {
+                "original_count": filtering_result["original_count"],
+                "filtered_count": filtering_result["filtered_count"],
+                "filtering_applied": filtering_result["filtering_applied"],
+                "group_size": filtering_result.get("group_size", 1),
+                "rationale": filtering_result["rationale"]
+            }
+        }
+        
+        # DEBUG print summary of results
+        print("[DEBUG] search_hotels_tool result_summary:", {
+            "original_count": filtering_result["original_count"],
+            "filtered_count": filtering_result["filtered_count"]
+        })
+
+        print(f"✅ Hotel search completed successfully!")
+        return result_payload
+        
+    except Exception as e:
+        print(f"❌ Error in search_hotels_tool: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"I encountered an error searching for hotels: {str(e)}"
+        }
+
+
+@function_tool  
+async def search_hotels_by_city_tool(
+    city: str,
+    radius: int = 5,
+    radius_unit: str = "KM",
+    amenities: Optional[List[str]] = None,
+    ratings: Optional[List[str]] = None
+) -> dict:
+    """
+    Search for hotels by city code, returning basic hotel information without specific dates.
+    Useful for general hotel discovery in a destination.
+    
+    Args:
+        city: City name or airport code, e.g., 'london' or 'LON'
+        radius: Search radius in kilometers (default: 5)
+        radius_unit: Radius unit, options: KM, MILE (default: KM)
+        amenities: List of amenities, e.g., ['SWIMMING_POOL', 'WIFI']
+        ratings: Hotel star ratings, e.g., ['4', '5']
+        
+    Returns:
+        Dict with basic hotel information
+    """
+    logger.info(f"Search hotels by city: city={city}, radius={radius}{radius_unit}")
+    
+    print("[DEBUG] search_hotels_by_city_tool called with:", {
+        "city": city,
+        "radius": radius,
+        "radius_unit": radius_unit,
+        "amenities": amenities,
+        "ratings": ratings,
+    })
+    
+    try:
+        hotel_agent = _get_hotel_agent()
+        if not hotel_agent:
+            return {"success": False, "error": "Hotel agent not available"}
+        
+        # Convert city names to city codes if needed
+        city_code = hotel_agent._convert_to_city_code(city)
+        
+        # For now, we'll use a simple fallback approach since we're using Amadeus service
+        # In a full implementation, this would call a separate city-based search endpoint
+        
+        # Use tomorrow as default check-in for basic search
+        tomorrow = datetime.now() + timedelta(days=1)
+        day_after = tomorrow + timedelta(days=1)
+        
+        search_results = await hotel_agent.amadeus_service.search_hotels(
+            city_code=city_code,
+            check_in_date=tomorrow.strftime("%Y-%m-%d"),
+            check_out_date=day_after.strftime("%Y-%m-%d"),
+            adults=1,
+            rooms=1,
+            max_results=10
+        )
+        
+        if not search_results.get("success"):
+            return {
+                "success": False,
+                "error": search_results.get("error", "Hotel search failed"),
+                "message": f"No hotels found in city '{city}' ({city_code}). Please try other cities or increase search radius."
+            }
+        
+        hotels = search_results.get("results", [])
+        
+        if not hotels:
+            return {
+                "success": False,
+                "message": f"No hotels found in city '{city}' ({city_code}). Please try other cities."
+            }
+        
+        # Format response for city-based search (focus on hotel info, not pricing)
+        response = f"Found {len(hotels)} hotels in {city} ({city_code}) within {radius}{radius_unit} radius:\n\n"
+        
+        for i, hotel_data in enumerate(hotels[:10], 1):  # Show up to 10 results
+            hotel = hotel_data.get("hotel", {})
+            hotel_name = hotel.get("name", "Unknown Hotel")
+            rating = hotel.get("rating", "")
+            address = hotel.get("address", {})
+            
+            response += f"Hotel {i}: {hotel_name}\n"
+            
+            if rating:
+                stars = "⭐" * int(float(rating)) if rating.replace('.', '').isdigit() else ""
+                response += f"• Rating: {rating}/5 {stars}\n"
+            
+            if address.get("cityName"):
+                response += f"• Location: {address.get('cityName', '')}\n"
+            
+            # Add amenities if available
+            amenities = hotel.get("amenities", [])
+            if amenities:
+                amenity_list = ", ".join(amenities[:3])  # Show first 3 amenities
+                response += f"• Amenities: {amenity_list}\n"
+            
+            response += "\n"
+        
+        response += "To see current prices and availability, please provide your travel dates!"
+        
+        return {
+            "success": True,
+            "message": response,
+            "hotels_found": len(hotels),
+            "city_code": city_code
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in search_hotels_by_city_tool: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"An error occurred while searching for hotels in {city}: {str(e)}"
+        }
+
+
+@function_tool
+async def get_hotel_offers_tool(hotel_selection: str) -> dict:
+    """
+    Get detailed offers for a selected hotel
+    
+    Args:
+        hotel_selection: Description of which hotel the user selected (e.g., "hotel 1", "the Hilton")
+    
+    Returns:
+        Dict with detailed hotel offers and room types
+    """
+    
+    print("[DEBUG] get_hotel_offers_tool called with:", hotel_selection)
+    
+    try:
+        hotel_agent = _get_hotel_agent()
+        if not hotel_agent:
+            return {"success": False, "error": "Hotel agent not available"}
+        
+        # Extract hotel number from selection
+        hotel_number = hotel_agent._extract_hotel_number(hotel_selection)
+        
+        if not hotel_number:
+            return {
+                "success": False,
+                "message": "I couldn't determine which hotel you selected. Please specify like 'hotel 1' or 'the first option'."
+            }
+        
+        # For now, return a detailed offers response
+        # In production, this would call Amadeus Hotel Offers API
+        result_payload = {
+            "success": True,
+            "message": f"Getting detailed room offers for hotel {hotel_number}...",
+            "hotel_number": hotel_number,
+            "offers_info": {
+                "note": "This would contain detailed room types and offers from Amadeus Hotel Offers API",
+                "includes": ["room_types", "amenities", "cancellation_policy", "breakfast_options", "pricing_breakdown"]
+            }
+        }
+        
+        print("[DEBUG] get_hotel_offers_tool returning payload for hotel_number", hotel_number)
+
+        return result_payload
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"I encountered an error getting hotel offers: {str(e)}"
+        }
+
+
 class HotelAgent:
     """
     Hotel agent using OpenAI Agents SDK with Amadeus API tools and profile filtering
     """
     
     def __init__(self):
+        global _current_hotel_agent
+        
         self.openai_client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
         self.amadeus_service = AmadeusService()
         self.db = DatabaseOperations()
         self.profile_agent = UserProfileAgent()
         
-        # Store context for tool calls (will be set during process_message)
+        # FIXED: Initialize context variables
         self.current_user_id = None
         self.current_session_id = None
         self.user_profile = None
         
+        # FIXED: Add attributes to store latest search results for response
+        self.latest_search_results = []
+        self.latest_search_id = None
+        self.latest_filtering_info = {}
+        
         # Set this instance as the global instance for tools
-        global _hotel_agent_instance
-        _hotel_agent_instance = self
+        _current_hotel_agent = self
         
         # Create the agent with hotel search tools
         self.agent = Agent(
@@ -246,10 +611,29 @@ class HotelAgent:
         """
         
         try:
-            # Store context for tool calls
+            print(f"🏨 HotelAgent processing message: '{message[:50]}...'")
+            
+            # FIXED: Clear previous search results at start of new message
+            self.latest_search_results = []
+            self.latest_search_id = None
+            self.latest_filtering_info = {}
+            
+            # FIXED: Store context for tool calls on the current instance
             self.current_user_id = user_id
             self.current_session_id = session_id
             self.user_profile = user_profile
+            
+            # FIXED: Also update the global instance to ensure tools have access
+            global _current_hotel_agent
+            _current_hotel_agent.current_user_id = user_id
+            _current_hotel_agent.current_session_id = session_id
+            _current_hotel_agent.user_profile = user_profile
+            # FIXED: Clear global instance results as well
+            _current_hotel_agent.latest_search_results = []
+            _current_hotel_agent.latest_search_id = None
+            _current_hotel_agent.latest_filtering_info = {}
+            
+            print(f"🔧 Context set: user_id={user_id}, session_id={session_id}")
             
             # Build conversation context
             context_messages = []
@@ -261,21 +645,39 @@ class HotelAgent:
                     "content": msg.content
                 })
             
+            print(f"🔧 Processing with {len(context_messages)} previous messages")
+            
             # Process with agent
             if not context_messages:
                 # First message in conversation
+                print("🚀 Starting new hotel conversation")
                 result = await Runner.run(self.agent, message)
             else:
                 # Continue conversation with context
+                print("🔄 Continuing hotel conversation with context")
                 result = await Runner.run(self.agent, context_messages + [{"role": "user", "content": message}])
             
             # Extract response
             assistant_message = result.final_output
             
+            print(f"✅ HotelAgent response generated: '{assistant_message[:50]}...'")
+            
+            # FIXED: Read search results from the global instance that tools updated
+            global_agent = _get_hotel_agent()
+            search_results = global_agent.latest_search_results if global_agent else []
+            search_id = global_agent.latest_search_id if global_agent else None
+            filtering_info = global_agent.latest_filtering_info if global_agent else {}
+            
+            print(f"📊 Retrieved search data: {len(search_results)} results, search_id: {search_id}")
+            
+            # FIXED: Include search results and search ID in response from global instance
             return {
                 "message": assistant_message,
                 "agent_type": "hotel",
                 "requires_action": False,  # Will be set to True if hotel selection is needed
+                "search_results": search_results,
+                "search_id": search_id,
+                "filtering_info": filtering_info,
                 "metadata": {
                     "agent_type": "hotel",
                     "conversation_type": "hotel_search"
@@ -283,18 +685,18 @@ class HotelAgent:
             }
         
         except Exception as e:
-            print(f"Error in hotel agent: {e}")
+            print(f"❌ Error in hotel agent: {e}")
             import traceback
             traceback.print_exc()
             return {
                 "message": "I'm sorry, I encountered an error while processing your request. Please try again or contact support if the issue persists.",
                 "agent_type": "hotel",
                 "error": str(e),
-                "requires_action": False
+                "requires_action": False,
+                "search_results": [],
+                "search_id": None,
+                "filtering_info": {}
             }
-    
-    # ==================== AGENT TOOLS ====================
-    # Tool functions are now defined at module level below the class
     
     # ==================== HELPER METHODS ====================
     
@@ -448,331 +850,6 @@ class HotelAgent:
                 return number
         
         return None
-
-
-# Global instance for tool functions to access
-_hotel_agent_instance = None
-
-def _get_hotel_agent():
-    """Get the global hotel agent instance"""
-    global _hotel_agent_instance
-    if _hotel_agent_instance is None:
-        raise RuntimeError("Hotel agent instance not initialized. Create a HotelAgent instance first.")
-    return _hotel_agent_instance
-
-
-@function_tool
-async def search_hotels_tool(destination: str, check_in_date: str, check_out_date: Optional[str] = None,
-                            adults: int = 1, rooms: int = 1, price_range: Optional[str] = None,
-                            currency: Optional[str] = None, board_type: Optional[str] = None) -> dict:
-    """
-    Search for hotels using Amadeus API with group profile filtering
-    
-    Args:
-        destination: Destination city or city code (e.g., 'Sydney', 'SYD')
-        check_in_date: Check-in date in YYYY-MM-DD format
-        check_out_date: Check-out date in YYYY-MM-DD format, defaults to one day after check-in
-        adults: Number of adults (default 1)
-        rooms: Number of rooms (default 1)
-        price_range: Price range, e.g., '100-200'
-        currency: Currency code, e.g., 'USD' or 'EUR'
-        board_type: Board type, options: ROOM_ONLY, BREAKFAST, HALF_BOARD, FULL_BOARD, ALL_INCLUSIVE
-    
-    Returns:
-        Dict with hotel search results and profile filtering information
-    """
-    
-    # ---------------------------------------------------------------------
-    # DEBUG LOGGING
-    # ---------------------------------------------------------------------
-    print("[DEBUG] search_hotels_tool called with:", {
-        "destination": destination,
-        "check_in_date": check_in_date,
-        "check_out_date": check_out_date,
-        "adults": adults,
-        "rooms": rooms,
-        "price_range": price_range,
-        "currency": currency,
-        "board_type": board_type,
-    })
-    
-    try:
-        hotel_agent = _get_hotel_agent()
-        
-        # Convert city names to city codes if needed
-        city_code = hotel_agent._convert_to_city_code(destination)
-        
-        # Handle board type mapping
-        board_type_processed = None
-        if board_type:
-            board_type_processed = BOARD_TYPE_MAPPING.get(board_type.lower(), board_type)
-            logger.info(f"Board type processed: {board_type} -> {board_type_processed}")
-        
-        # Handle default check-out date (one day after check-in)
-        if not check_out_date:
-            try:
-                check_in_dt = datetime.strptime(check_in_date, "%Y-%m-%d")
-                check_out_dt = check_in_dt + timedelta(days=1)
-                check_out_date = check_out_dt.strftime("%Y-%m-%d")
-                logger.info(f"Auto-generated check_out_date: {check_out_date}")
-            except ValueError:
-                return {
-                    "success": False,
-                    "error": "Invalid check_in_date format",
-                    "message": "Please provide check-in date in YYYY-MM-DD format"
-                }
-        
-        # Perform hotel search
-        search_results = await hotel_agent.amadeus_service.search_hotels(
-            city_code=city_code,
-            check_in_date=check_in_date,
-            check_out_date=check_out_date,
-            adults=adults,
-            rooms=rooms,
-            max_results=15  # Get more results for better filtering
-        )
-        
-        if not search_results.get("success"):
-            return {
-                "success": False,
-                "error": search_results.get("error", "Hotel search failed"),
-                "message": f"Sorry, I couldn't find hotels in {destination} for {check_in_date} to {check_out_date}. Please check your dates and destination."
-            }
-        
-        # Apply profile-based filtering
-        search_params = {
-            "city_code": city_code,
-            "destination": destination,
-            "check_in_date": check_in_date,
-            "check_out_date": check_out_date,
-            "adults": adults,
-            "rooms": rooms
-        }
-        
-        # Filter results based on group profiles
-        filtering_result = await hotel_agent.profile_agent.filter_hotel_results(
-            user_id=hotel_agent.current_user_id,
-            hotel_results=search_results["results"],
-            search_params=search_params
-        )
-        
-        # Save search to database (save original results for analytics)
-        hotel_search = HotelSearch(
-            search_id=str(uuid.uuid4()),
-            user_id=hotel_agent.current_user_id,
-            city_code=city_code,
-            check_in_date=check_in_date,
-            check_out_date=check_out_date,
-            adults=adults,
-            rooms=rooms,
-            search_results=search_results["results"],  # Save original results
-            result_count=len(filtering_result["filtered_results"]),
-            search_successful=True
-        )
-        
-        await hotel_agent.db.save_hotel_search(hotel_search)
-        
-        # Format results for presentation
-        formatted_results = hotel_agent._format_hotel_results_for_agent(
-            filtering_result["filtered_results"], 
-            destination,
-            check_in_date, 
-            check_out_date,
-            filtering_result
-        )
-        
-        result_payload = {
-            "success": True,
-            "results": filtering_result["filtered_results"],
-            "formatted_results": formatted_results,
-            "search_id": hotel_search.search_id,
-            "search_params": search_params,
-            "filtering_info": {
-                "original_count": filtering_result["original_count"],
-                "filtered_count": filtering_result["filtered_count"],
-                "filtering_applied": filtering_result["filtering_applied"],
-                "group_size": filtering_result.get("group_size", 1),
-                "rationale": filtering_result["rationale"]
-            }
-        }
-        
-        # DEBUG print summary of results
-        print("[DEBUG] search_hotels_tool result_summary:", {
-            "original_count": filtering_result["original_count"],
-            "filtered_count": filtering_result["filtered_count"]
-        })
-
-        return result_payload
-        
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "message": f"I encountered an error searching for hotels: {str(e)}"
-        }
-
-
-@function_tool  
-async def search_hotels_by_city_tool(
-    city: str,
-    radius: int = 5,
-    radius_unit: str = "KM",
-    amenities: Optional[List[str]] = None,
-    ratings: Optional[List[str]] = None
-) -> dict:
-    """
-    Search for hotels by city code, returning basic hotel information without specific dates.
-    Useful for general hotel discovery in a destination.
-    
-    Args:
-        city: City name or airport code, e.g., 'london' or 'LON'
-        radius: Search radius in kilometers (default: 5)
-        radius_unit: Radius unit, options: KM, MILE (default: KM)
-        amenities: List of amenities, e.g., ['SWIMMING_POOL', 'WIFI']
-        ratings: Hotel star ratings, e.g., ['4', '5']
-        
-    Returns:
-        Dict with basic hotel information
-    """
-    logger.info(f"Search hotels by city: city={city}, radius={radius}{radius_unit}")
-    
-    print("[DEBUG] search_hotels_by_city_tool called with:", {
-        "city": city,
-        "radius": radius,
-        "radius_unit": radius_unit,
-        "amenities": amenities,
-        "ratings": ratings,
-    })
-    
-    try:
-        hotel_agent = _get_hotel_agent()
-        
-        # Convert city names to city codes if needed
-        city_code = hotel_agent._convert_to_city_code(city)
-        
-        # For now, we'll use a simple fallback approach since we're using Amadeus service
-        # In a full implementation, this would call a separate city-based search endpoint
-        
-        # Use tomorrow as default check-in for basic search
-        tomorrow = datetime.now() + timedelta(days=1)
-        day_after = tomorrow + timedelta(days=1)
-        
-        search_results = await hotel_agent.amadeus_service.search_hotels(
-            city_code=city_code,
-            check_in_date=tomorrow.strftime("%Y-%m-%d"),
-            check_out_date=day_after.strftime("%Y-%m-%d"),
-            adults=1,
-            rooms=1,
-            max_results=10
-        )
-        
-        if not search_results.get("success"):
-            return {
-                "success": False,
-                "error": search_results.get("error", "Hotel search failed"),
-                "message": f"No hotels found in city '{city}' ({city_code}). Please try other cities or increase search radius."
-            }
-        
-        hotels = search_results.get("results", [])
-        
-        if not hotels:
-            return {
-                "success": False,
-                "message": f"No hotels found in city '{city}' ({city_code}). Please try other cities."
-            }
-        
-        # Format response for city-based search (focus on hotel info, not pricing)
-        response = f"Found {len(hotels)} hotels in {city} ({city_code}) within {radius}{radius_unit} radius:\n\n"
-        
-        for i, hotel_data in enumerate(hotels[:10], 1):  # Show up to 10 results
-            hotel = hotel_data.get("hotel", {})
-            hotel_name = hotel.get("name", "Unknown Hotel")
-            rating = hotel.get("rating", "")
-            address = hotel.get("address", {})
-            
-            response += f"Hotel {i}: {hotel_name}\n"
-            
-            if rating:
-                stars = "⭐" * int(float(rating)) if rating.replace('.', '').isdigit() else ""
-                response += f"• Rating: {rating}/5 {stars}\n"
-            
-            if address.get("cityName"):
-                response += f"• Location: {address.get('cityName', '')}\n"
-            
-            # Add amenities if available
-            amenities = hotel.get("amenities", [])
-            if amenities:
-                amenity_list = ", ".join(amenities[:3])  # Show first 3 amenities
-                response += f"• Amenities: {amenity_list}\n"
-            
-            response += "\n"
-        
-        response += "To see current prices and availability, please provide your travel dates!"
-        
-        return {
-            "success": True,
-            "message": response,
-            "hotels_found": len(hotels),
-            "city_code": city_code
-        }
-        
-    except Exception as e:
-        logger.error(f"Error in search_hotels_by_city_tool: {str(e)}")
-        return {
-            "success": False,
-            "error": str(e),
-            "message": f"An error occurred while searching for hotels in {city}: {str(e)}"
-        }
-
-
-@function_tool
-async def get_hotel_offers_tool(hotel_selection: str) -> dict:
-    """
-    Get detailed offers for a selected hotel
-    
-    Args:
-        hotel_selection: Description of which hotel the user selected (e.g., "hotel 1", "the Hilton")
-    
-    Returns:
-        Dict with detailed hotel offers and room types
-    """
-    
-    print("[DEBUG] get_hotel_offers_tool called with:", hotel_selection)
-    
-    try:
-        hotel_agent = _get_hotel_agent()
-        
-        # Extract hotel number from selection
-        hotel_number = hotel_agent._extract_hotel_number(hotel_selection)
-        
-        if not hotel_number:
-            return {
-                "success": False,
-                "message": "I couldn't determine which hotel you selected. Please specify like 'hotel 1' or 'the first option'."
-            }
-        
-        # For now, return a detailed offers response
-        # In production, this would call Amadeus Hotel Offers API
-        result_payload = {
-            "success": True,
-            "message": f"Getting detailed room offers for hotel {hotel_number}...",
-            "hotel_number": hotel_number,
-            "offers_info": {
-                "note": "This would contain detailed room types and offers from Amadeus Hotel Offers API",
-                "includes": ["room_types", "amenities", "cancellation_policy", "breakfast_options", "pricing_breakdown"]
-            }
-        }
-        
-        print("[DEBUG] get_hotel_offers_tool returning payload for hotel_number", hotel_number)
-
-        return result_payload
-        
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "message": f"I encountered an error getting hotel offers: {str(e)}"
-        }
 
 
 # ===== Utility Functions =====
