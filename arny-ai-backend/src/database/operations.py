@@ -212,20 +212,34 @@ class DatabaseOperations:
         try:
             logger.info(f"Completing onboarding for user_id: {user_id}")
             
+            # Filter out fields that don't belong in user_profiles table
+            user_profile_fields = {
+                'name', 'gender', 'birthdate', 'city', 'employer',
+                'working_schedule', 'holiday_frequency', 'annual_income',
+                'monthly_spending', 'holiday_preferences', 'travel_style',
+                'group_code', 'email'
+            }
+
+            # Filter profile data to only include fields that exist in user_profiles table
+            filtered_profile_data = {
+                key: value for key, value in profile_data.items()
+                if key in user_profile_fields
+            }
+
             # Mark onboarding as completed
-            profile_data["onboarding_completed"] = True
-            profile_data["updated_at"] = datetime.utcnow().isoformat()
-            
-            # Update user profile
-            success = await self.update_user_profile(user_id, profile_data)
-            
+            filtered_profile_data["onboarding_completed"] = True
+            filtered_profile_data["updated_at"] = datetime.utcnow().isoformat()
+
+            # Update user profile with filtered data
+            success = await self.update_user_profile(user_id, filtered_profile_data)
+
             if success:
                 # Update onboarding progress to completed
                 await self.update_onboarding_progress(user_id, OnboardingStep.COMPLETED, profile_data)
                 logger.info(f"Onboarding completed successfully for user_id: {user_id}")
-            
+
             return success
-            
+        
         except Exception as e:
             logger.error(f"Error completing onboarding for {user_id}: {e}")
             return False
