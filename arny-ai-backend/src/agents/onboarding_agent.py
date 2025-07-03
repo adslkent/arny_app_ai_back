@@ -1,9 +1,4 @@
 import json
-import base64
-import urllib.parse
-import requests
-import email.mime.text
-import re
 import asyncio
 import concurrent.futures
 from datetime import datetime
@@ -12,9 +7,6 @@ from enum import Enum
 
 from openai import OpenAI
 from agents import Agent, Runner, function_tool
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-import msal
 
 from ..utils.config import config
 from ..utils.group_codes import GroupCodeGenerator
@@ -31,22 +23,16 @@ def _get_onboarding_agent():
     return _current_onboarding_agent
 
 def _run_async_safely(coro):
-    """
-    Run async coroutine safely by using the current event loop or creating a new one
-    """
+    """Run async coroutine safely by using the current event loop or creating a new one"""
     try:
-        # Try to get the current event loop
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # If loop is running, use run_in_executor to run in a thread
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(_run_in_new_loop, coro)
                 return future.result()
         else:
-            # If no loop is running, use asyncio.run
             return asyncio.run(coro)
     except RuntimeError:
-        # If no event loop exists, create one
         return asyncio.run(coro)
 
 def _run_in_new_loop(coro):
@@ -59,12 +45,12 @@ def _run_in_new_loop(coro):
         new_loop.close()
         asyncio.set_event_loop(None)
 
-# ==================== STANDALONE TOOL FUNCTIONS ====================
+# ==================== ENHANCED TOOL FUNCTIONS ====================
 
 @function_tool
 def scan_email_for_profile_tool(email: str) -> dict:
     """
-    Scan email for profile information
+    Scan email for profile information using OAuth
     Returns a dict with keys: name, gender, birthdate, city
     """
     try:
@@ -72,20 +58,35 @@ def scan_email_for_profile_tool(email: str) -> dict:
         if not agent:
             return {"error": "Agent not available"}
         
+        print(f"📧 Scanning email for profile: {email}")
+        
         # Store email in collected data
         agent.current_collected_data["email"] = email
-        print(f"📧 Stored email: {email}")
         
-        # For now, return empty profile (email scanning would require OAuth setup)
-        # In production, this would implement the full OAuth flow
-        profile_data = {
-            "name": None,
-            "gender": None,
-            "birthdate": None,
-            "city": None
+        # Use the enhanced email service to scan for profile
+        profile_data = agent.email_service.scan_email_for_profile(email, agent.current_user_id)
+        
+        print(f"📊 Profile scan results: {profile_data}")
+        
+        # Store any found profile data in collected data
+        if profile_data.get("success"):
+            if profile_data.get("name"):
+                agent.current_collected_data["name"] = profile_data["name"]
+            if profile_data.get("gender"):
+                agent.current_collected_data["gender"] = profile_data["gender"]
+            if profile_data.get("birthdate"):
+                agent.current_collected_data["birthdate"] = profile_data["birthdate"]
+            if profile_data.get("city"):
+                agent.current_collected_data["city"] = profile_data["city"]
+        
+        return {
+            "name": profile_data.get("name"),
+            "gender": profile_data.get("gender"),
+            "birthdate": profile_data.get("birthdate"),
+            "city": profile_data.get("city"),
+            "success": profile_data.get("success", False),
+            "error": profile_data.get("error")
         }
-        
-        return profile_data
         
     except Exception as e:
         print(f"Error in scan_email_for_profile_tool: {str(e)}")
@@ -94,6 +95,7 @@ def scan_email_for_profile_tool(email: str) -> dict:
             "gender": None,
             "birthdate": None,
             "city": None,
+            "success": False,
             "error": str(e)
         }
 
@@ -280,7 +282,13 @@ def store_holiday_preferences_tool(holiday_preferences: str) -> dict:
 @function_tool
 def send_group_invites_tool(email_addresses: str) -> dict:
     """
-    Send group invitation emails
+    Send group invitation emails using the enhanced email service
+    
+    Args:
+        email_addresses: String containing email addresses to send invites to
+        
+    Returns:
+        Dict with success status and details
     """
     try:
         agent = _get_onboarding_agent()
@@ -289,29 +297,31 @@ def send_group_invites_tool(email_addresses: str) -> dict:
         
         group_code = agent.current_collected_data.get("group_code")
         sender_name = agent.current_collected_data.get("name", "Arny User")
-        sender_email = agent.current_collected_data.get("email", "")
         
         if not group_code:
             return {"success": False, "error": "No group code available"}
         
-        # Validate email addresses
-        valid_emails = agent.email_service.validate_email_addresses(email_addresses)
+        print(f"📧 Sending group invites to: {email_addresses}")
+        print(f"📋 Group code: {group_code}, Sender: {sender_name}")
         
-        if not valid_emails:
-            return {"success": False, "error": "No valid email addresses found"}
+        # Use the enhanced email service to send invites
+        result = _run_async_safely(
+            agent.email_service.send_group_invites(
+                user_id=agent.current_user_id,
+                email_addresses=email_addresses,
+                group_code=group_code,
+                sender_name=sender_name
+            )
+        )
         
-        # Mark invites as sent
-        agent.current_collected_data["group_invites_sent"] = True
-        agent.current_collected_data["invited_emails"] = valid_emails
+        print(f"📬 Invite sending result: {result}")
         
-        # For now, simulate successful sending
-        # In production, this would use the full email service
-        return {
-            "success": True,
-            "message": f"Invitations would be sent to: {', '.join(valid_emails)}",
-            "sent_to": valid_emails,
-            "group_code": group_code
-        }
+        if result.get("success"):
+            # Mark invites as sent
+            agent.current_collected_data["group_invites_sent"] = True
+            agent.current_collected_data["invited_emails"] = result.get("sent_to", [])
+        
+        return result
         
     except Exception as e:
         print(f"Error in send_group_invites_tool: {str(e)}")
@@ -467,32 +477,25 @@ def skip_group_setup_tool() -> dict:
         traceback.print_exc()
         return {"success": False, "error": str(e)}
 
-# ==================== ONBOARDING AGENT CLASS ====================
+# ==================== ENHANCED ONBOARDING AGENT CLASS ====================
 
 class OnboardingAgent:
     """
-    LLM-driven onboarding agent using OpenAI Agents SDK with tools - FIXED VERSION
-    
-    Fixed Issues:
-    1. Added tools for collecting and storing user information
-    2. Proper conversation state management
-    3. Better progress tracking and continuation
-    4. Improved step detection and flow control
-    5. Hidden group code when skipping group setup
+    Enhanced LLM-driven onboarding agent with email scanning capabilities
     """
     
     def __init__(self):
         global _current_onboarding_agent
         
         self.openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
-        self.email_service = EmailService()
+        self.email_service = EmailService()  # Use the enhanced email service
         self.db = DatabaseOperations()
         self.group_generator = GroupCodeGenerator()
         
         # Store this instance globally for tool access
         _current_onboarding_agent = self
         
-        # Create the agent with tools using Agents SDK
+        # Create the agent with enhanced tools using Agents SDK
         self.agent = Agent(
             name="Arny Onboarding Assistant",
             instructions=(
@@ -555,7 +558,7 @@ class OnboardingAgent:
     async def process_message(self, user_id: str, message: str, session_id: str, 
                             current_progress: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process message using OpenAI Agents SDK - FIXED VERSION
+        Process message using OpenAI Agents SDK with enhanced email capabilities
         """
         
         try:
