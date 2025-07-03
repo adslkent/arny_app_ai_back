@@ -613,8 +613,8 @@ class OnboardingAgent:
             if len(conversation_history) > 20:
                 conversation_history = conversation_history[-20:]
             
-            # Check if onboarding is complete
-            onboarding_complete = self._detect_onboarding_completion(assistant_message)
+            # Check if onboarding is complete using LLM-based detection
+            onboarding_complete = await self._detect_onboarding_completion(assistant_message)
             
             # Update progress
             updated_progress = {
@@ -653,10 +653,63 @@ class OnboardingAgent:
                 "error": str(e)
             }
     
-    def _detect_onboarding_completion(self, message: str) -> bool:
-        """Detect if the agent has completed onboarding with flexible phrase matching"""
+    async def _detect_onboarding_completion(self, message: str) -> bool:
+        """Detect if the agent has completed onboarding using LLM analysis"""
+        try:
+            print(f"🔍 Using LLM to detect onboarding completion for message: '{message[:100]}...'")
+            
+            # Use OpenAI's o4-mini model to detect onboarding completion
+            prompt = f"""You are analyzing a message from an AI onboarding assistant to determine if it indicates that the onboarding process has been completed.
+
+Message to analyze: "{message}"
+
+Determine if this message indicates that the onboarding process has been completed. Look for indicators such as:
+- Explicit statements about completing onboarding (e.g., "this completes your onboarding", "onboarding is complete")
+- Thank you messages that suggest finalization
+- Statements that the user can now proceed to use the main features
+- Congratulations or completion confirmations
+- Messages indicating the user is ready to start using the app
+
+Respond with only "YES" if the message clearly indicates onboarding completion, or "NO" if it does not."""
+
+            response = self.openai_client.responses.create(
+                model="o4-mini",
+                input=prompt
+            )
+            
+            # Extract response
+            if response and hasattr(response, 'output') and response.output:
+                for output_item in response.output:
+                    if hasattr(output_item, 'content') and output_item.content:
+                        for content_item in output_item.content:
+                            if hasattr(content_item, 'text') and content_item.text:
+                                response_text = content_item.text.strip().upper()
+                                
+                                print(f"🤖 LLM completion detection result: '{response_text}'")
+                                
+                                is_complete = response_text == "YES"
+                                if is_complete:
+                                    print("🎉 LLM detected onboarding completion!")
+                                else:
+                                    print("🔄 LLM determined onboarding is not complete yet")
+                                
+                                return is_complete
+            
+            # If we can't parse the response, fall back to phrase detection
+            print("⚠️ Could not parse LLM response, using fallback detection")
+            return self._fallback_phrase_detection(message)
+            
+        except Exception as e:
+            print(f"❌ Error in LLM-based completion detection: {e}")
+            # Fallback to phrase-based detection on error
+            return self._fallback_phrase_detection(message)
+
+    def _fallback_phrase_detection(self, message: str) -> bool:
+        """Fallback phrase-based detection for onboarding completion"""
+        print("🔄 Using fallback phrase-based detection")
+        
         message_lower = message.lower()
-    
+
         # Key phrases that indicate completion
         completion_phrases = [
             "this completes your onboarding to arny",
@@ -666,14 +719,15 @@ class OnboardingAgent:
             "thank you, this completes your onboarding",
             "that completes your onboarding"
         ]
-    
+
         # Check if any completion phrase is found
         for phrase in completion_phrases:
             if phrase in message_lower:
+                print(f"✅ Fallback detection found completion phrase: '{phrase}'")
                 return True
-    
-        return False
 
+        print("❌ Fallback detection found no completion phrases")
+        return False
 
     def _determine_current_step_from_data(self, collected_data: Dict[str, Any]) -> str:
         """Determine current step based on collected data for progress summary"""
