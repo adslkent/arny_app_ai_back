@@ -4,7 +4,7 @@ Database operations for Arny AI - FIXED VERSION
 Fixed Issues:
 1. Consistent UUID validation across all methods
 2. Better error handling for UUID validation
-3. Improved progress loading and saving
+3. Improved progress loading and saving with better JSON handling
 """
 
 from typing import Optional, Dict, Any, List, Union, Tuple
@@ -234,7 +234,7 @@ class DatabaseOperations:
     
     async def get_onboarding_progress(self, user_id: str) -> Optional[OnboardingProgress]:
         """
-        Get onboarding progress for user - FIXED VERSION
+        Get onboarding progress for user - FIXED VERSION with better JSON handling
         """
         try:
             # Use consistent UUID validation
@@ -249,6 +249,26 @@ class DatabaseOperations:
             
             if response.data and len(response.data) > 0:
                 progress_data = response.data[0]
+                
+                # FIXED: Better handling of collected_data JSON parsing
+                collected_data = progress_data.get("collected_data")
+                if collected_data:
+                    if isinstance(collected_data, str):
+                        try:
+                            # Try to parse the JSON string
+                            parsed_data = json.loads(collected_data)
+                            progress_data["collected_data"] = parsed_data
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Failed to parse collected_data JSON for user {validated_user_id}: {e}")
+                            logger.error(f"Corrupted data: {collected_data[:200]}...")
+                            # Set to empty dict if JSON is corrupted
+                            progress_data["collected_data"] = {}
+                    elif not isinstance(collected_data, dict):
+                        logger.warning(f"collected_data is neither string nor dict for user {validated_user_id}, setting to empty dict")
+                        progress_data["collected_data"] = {}
+                else:
+                    progress_data["collected_data"] = {}
+                
                 logger.info(f"Onboarding progress found for user_id: {validated_user_id}")
                 return OnboardingProgress(**progress_data)
             
@@ -261,7 +281,7 @@ class DatabaseOperations:
     
     async def update_onboarding_progress(self, user_id: str, step: OnboardingStep, data: Dict[str, Any]) -> bool:
         """
-        Update onboarding progress - FIXED VERSION
+        Update onboarding progress - FIXED VERSION with better JSON handling
         """
         try:
             # Use consistent UUID validation
@@ -272,10 +292,14 @@ class DatabaseOperations:
             
             logger.info(f"Updating onboarding progress for user_id: {validated_user_id}, step: {step.value}")
             
+            # FIXED: Ensure data is properly formatted for JSON storage
+            # The data should already be in the correct format from the agent
+            collected_data_json = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+            
             progress_data = {
                 "user_id": validated_user_id,  # Use validated user_id
                 "current_step": step.value,
-                "collected_data": json.dumps(data),
+                "collected_data": collected_data_json,
                 "updated_at": datetime.utcnow().isoformat()
             }
             
