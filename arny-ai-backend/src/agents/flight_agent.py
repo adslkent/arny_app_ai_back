@@ -1,6 +1,7 @@
 import uuid
 import logging
 import asyncio
+import concurrent.futures
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 
@@ -23,6 +24,28 @@ def _get_flight_agent():
     """Get the current flight agent instance"""
     global _current_flight_agent
     return _current_flight_agent
+
+def _run_async_safely(coro):
+    """Run async coroutine safely by using the current event loop or creating a new one"""
+    try:
+        loop = asyncio.get_running_loop()
+        # If there's already a running loop, we need to run in a thread
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(_run_in_new_loop, coro)
+            return future.result()
+    except RuntimeError:
+        # No running loop, we can use asyncio.run
+        return asyncio.run(coro)
+
+def _run_in_new_loop(coro):
+    """Run coroutine in a completely new event loop"""
+    new_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(new_loop)
+    try:
+        return new_loop.run_until_complete(coro)
+    finally:
+        new_loop.close()
+        asyncio.set_event_loop(None)
 
 # ===== Enhanced Airport Code Mapping =====
 AIRPORT_CODE_MAPPING = {
@@ -138,23 +161,32 @@ def search_flights_tool(origin: str, destination: str, departure_date: str,
         if not agent:
             return {"success": False, "error": "Flight agent not available"}
         
+        print(f"🔍 Search flights tool called with: {origin} → {destination} on {departure_date}")
+        
         # Convert city names to airport codes if needed
         origin_code = agent._convert_to_airport_code(origin)
         destination_code = agent._convert_to_airport_code(destination)
         
-        # Perform flight search
-        import asyncio
-        search_results = asyncio.run(agent.amadeus_service.search_flights(
-            origin=origin_code,
-            destination=destination_code,
-            departure_date=departure_date,
-            return_date=return_date,
-            adults=adults,
-            cabin_class=cabin_class,
-            max_results=12  # Get more results for better filtering
-        ))
+        print(f"✅ Converted codes: {origin_code} → {destination_code}")
+        
+        # Perform flight search using the safe async runner
+        print(f"🛫 Calling Amadeus API...")
+        search_results = _run_async_safely(
+            agent.amadeus_service.search_flights(
+                origin=origin_code,
+                destination=destination_code,
+                departure_date=departure_date,
+                return_date=return_date,
+                adults=adults,
+                cabin_class=cabin_class,
+                max_results=12  # Get more results for better filtering
+            )
+        )
+        
+        print(f"📊 Amadeus API response: success={search_results.get('success')}, results={len(search_results.get('results', []))}")
         
         if not search_results.get("success"):
+            print(f"❌ Amadeus API error: {search_results.get('error')}")
             return {
                 "success": False,
                 "error": search_results.get("error", "Flight search failed"),
@@ -171,12 +203,17 @@ def search_flights_tool(origin: str, destination: str, departure_date: str,
             "cabin_class": cabin_class
         }
         
+        print(f"🔧 Applying profile filtering...")
         # Filter results based on group profiles
-        filtering_result = asyncio.run(agent.profile_agent.filter_flight_results(
-            user_id=agent.current_user_id,
-            flight_results=search_results["results"],
-            search_params=search_params
-        ))
+        filtering_result = _run_async_safely(
+            agent.profile_agent.filter_flight_results(
+                user_id=agent.current_user_id,
+                flight_results=search_results["results"],
+                search_params=search_params
+            )
+        )
+        
+        print(f"✅ Filtering complete: {filtering_result['filtered_count']} of {filtering_result['original_count']} results")
         
         # Save search to database (save original results for analytics)
         flight_search = FlightSearch(
@@ -193,7 +230,8 @@ def search_flights_tool(origin: str, destination: str, departure_date: str,
             search_successful=True
         )
         
-        asyncio.run(agent.db.save_flight_search(flight_search))
+        print(f"💾 Saving search to database...")
+        _run_async_safely(agent.db.save_flight_search(flight_search))
         
         # Format results for presentation
         formatted_results = agent._format_flight_results_for_agent(
@@ -204,7 +242,7 @@ def search_flights_tool(origin: str, destination: str, departure_date: str,
             filtering_result
         )
         
-        return {
+        result_payload = {
             "success": True,
             "results": filtering_result["filtered_results"],
             "formatted_results": formatted_results,
@@ -219,7 +257,13 @@ def search_flights_tool(origin: str, destination: str, departure_date: str,
             }
         }
         
+        print(f"✅ Flight search completed successfully!")
+        return result_payload
+        
     except Exception as e:
+        print(f"❌ Error in search_flights_tool: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return {
             "success": False,
             "error": str(e),
@@ -242,7 +286,7 @@ def search_airports_tool(keyword: str, subtype: str = "AIRPORT") -> dict:
         if not agent:
             return {"success": False, "error": "Flight agent not available"}
         
-        airports = asyncio.run(agent.amadeus_service.search_airports(keyword, subtype))
+        airports = _run_async_safely(agent.amadeus_service.search_airports(keyword, subtype))
         
         if not airports:
             return {
@@ -289,7 +333,7 @@ def get_checkin_links_tool(airline_code: str) -> dict:
         if not agent:
             return {"success": False, "error": "Flight agent not available"}
         
-        links = asyncio.run(agent.amadeus_service.get_flight_checkin_links(airline_code))
+        links = _run_async_safely(agent.amadeus_service.get_flight_checkin_links(airline_code))
         
         if not links:
             return {
@@ -405,6 +449,8 @@ class FlightAgent:
         """
         
         try:
+            print(f"✈️ FlightAgent processing message: '{message[:50]}...'")
+            
             # Store context for tool calls
             self.current_user_id = user_id
             self.current_session_id = session_id
@@ -420,16 +466,22 @@ class FlightAgent:
                     "content": msg.content
                 })
             
+            print(f"🔧 Processing with {len(context_messages)} previous messages")
+            
             # Process with agent
             if not context_messages:
-                # First message in conversation - FIXED: use await Runner.run instead of Runner.run_sync
+                # First message in conversation
+                print("🚀 Starting new flight conversation")
                 result = await Runner.run(self.agent, message)
             else:
-                # Continue conversation with context - FIXED: use await Runner.run instead of Runner.run_sync
+                # Continue conversation with context
+                print("🔄 Continuing flight conversation with context")
                 result = await Runner.run(self.agent, context_messages + [{"role": "user", "content": message}])
             
             # Extract response
             assistant_message = result.final_output
+            
+            print(f"✅ FlightAgent response generated: '{assistant_message[:50]}...'")
             
             return {
                 "message": assistant_message,
@@ -442,7 +494,9 @@ class FlightAgent:
             }
         
         except Exception as e:
-            print(f"Error in flight agent: {e}")
+            print(f"❌ Error in flight agent: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 "message": "I'm sorry, I encountered an error while searching for flights. Please try again.",
                 "agent_type": "flight",
