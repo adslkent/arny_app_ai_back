@@ -4,31 +4,429 @@ import base64
 import requests
 import email.mime.text
 import email.mime.multipart
+import webbrowser
+import urllib.parse
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import List, Dict, Any, Optional
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 import msal
+from openai import OpenAI
 
 from ..utils.config import config
 
+class OAuthCallbackHandler(BaseHTTPRequestHandler):
+    """HTTP handler for OAuth callbacks"""
+    
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/auth/google/callback":
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        qs = urllib.parse.parse_qs(parsed.query)
+        code = qs.get("code", [None])[0]
+        if not code:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Missing code")
+            return
+
+        # Exchange code for tokens
+        token_res = requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": config.GOOGLE_CLIENT_ID,
+                "client_secret": config.GOOGLE_CLIENT_SECRET,
+                "redirect_uri": config.GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            headers={"Accept": "application/json"},
+        )
+        tok = token_res.json()
+        if "access_token" not in tok:
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(f"Token exchange failed: {tok}".encode())
+            return
+
+        # Decode ID token for email
+        id_token = tok.get("id_token", "")
+        parts = id_token.split(".")
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+
+        # Store tokens and claims for retrieval
+        self.server.tok = tok
+        self.server.claims = claims
+
+        # Return success response
+        message = {"message": f"Email {claims.get('email')} linked successfully! You can close this window."}
+        body = json.dumps(message).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        """Suppress HTTP server logs"""
+        pass
+
 class EmailService:
-    """Service for sending group invitation emails via Gmail or Outlook"""
+    """Enhanced service for email operations including OAuth and profile extraction"""
     
     def __init__(self):
-        pass
+        self.openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
+        self.stored_credentials = {}  # Store user credentials by user_id
+    
+    def extract_city_with_ai(self, address_text: str) -> Optional[str]:
+        """Use OpenAI to extract city from address text"""
+        if not address_text or len(address_text) < 2:
+            return None
+        
+        try:
+            input_prompt = f"""Extract ONLY the city name from this address: "{address_text}"
+
+Rules:
+- Return ONLY the city name, nothing else
+- Do not include state, country, postal codes, or street details
+- For international addresses, return the city in English if possible
+- If multiple cities are mentioned, return the main/primary city
+- If no clear city can be identified, return "UNKNOWN"
+
+Examples:
+- "803/27 King Street, Sydney NSW 2000" → "Sydney"
+- "123 Main St, New York, NY 10001" → "New York"
+- "45 Avenue des Champs-Élysées, 75008 Paris, France" → "Paris"
+
+Address: "{address_text}"
+City:"""
+
+            response = self.openai_client.responses.create(
+                model="o4-mini",
+                input=input_prompt
+            )
+            
+            if response and hasattr(response, 'output') and response.output:
+                for output_item in response.output:
+                    if hasattr(output_item, 'content') and output_item.content:
+                        for content_item in output_item.content:
+                            if hasattr(content_item, 'text') and content_item.text:
+                                city = content_item.text.strip()
+                                
+                                if city and city != "UNKNOWN" and len(city) <= 50 and not any(char.isdigit() for char in city):
+                                    return city.strip('"\'')
+            
+            return None
+            
+        except Exception as e:
+            print(f"City extraction failed for '{address_text}': {str(e)}")
+            return None
+    
+    def extract_city_from_google_data(self, person: Dict[str, Any]) -> Optional[str]:
+        """Extract city from Google People API data using AI"""
+        priority_fields = ['residences', 'locations', 'addresses']
+        
+        for field_name in priority_fields:
+            field_data = person.get(field_name, [])
+            
+            if not field_data:
+                continue
+                
+            for item in field_data:
+                if isinstance(item, dict):
+                    if 'value' in item and isinstance(item['value'], str):
+                        address_value = item['value']
+                        city = self.extract_city_with_ai(address_value)
+                        if city:
+                            return city
+                    
+                    for key, value in item.items():
+                        if key != 'value' and isinstance(value, str) and value:
+                            city = self.extract_city_with_ai(value)
+                            if city:
+                                return city
+        
+        # Check other fields that might contain location info
+        other_fields = ['biographies', 'interests', 'organizations']
+        for field_name in other_fields:
+            field_data = person.get(field_name, [])
+            if field_data:
+                for item in field_data:
+                    if isinstance(item, dict):
+                        for key, value in item.items():
+                            if isinstance(value, str) and value and len(value) > 5:
+                                if any(word in value.lower() for word in ['street', 'avenue', 'road', 'city', 'town', 'address']):
+                                    city = self.extract_city_with_ai(value)
+                                    if city:
+                                        return city
+        
+        return None
+    
+    def scan_gmail_profile(self, email: str, user_id: str) -> Dict[str, Any]:
+        """Scan Gmail for profile information using OAuth"""
+        try:
+            # Define comprehensive scopes
+            scopes = [
+                "openid", 
+                "email", 
+                "profile",
+                "https://www.googleapis.com/auth/user.birthday.read",
+                "https://www.googleapis.com/auth/user.gender.read",
+                "https://www.googleapis.com/auth/user.addresses.read",
+                "https://www.googleapis.com/auth/userinfo.profile",
+                "https://www.googleapis.com/auth/userinfo.email",
+                "https://www.googleapis.com/auth/user.organization.read",
+                "https://www.googleapis.com/auth/gmail.send"
+            ]
+            
+            # Build OAuth URL
+            auth_url = (
+                "https://accounts.google.com/o/oauth2/v2/auth"
+                f"?client_id={config.GOOGLE_CLIENT_ID}"
+                f"&redirect_uri={urllib.parse.quote(config.GOOGLE_REDIRECT_URI, safe='')}"
+                "&response_type=code"
+                "&access_type=offline"
+                "&prompt=consent"
+                f"&scope={'%20'.join(urllib.parse.quote(s) for s in scopes)}"
+            )
+            
+            print(f"Please visit this URL to authorize Gmail access: {auth_url}")
+            webbrowser.open(auth_url)
+
+            # Wait for callback
+            server = HTTPServer(("localhost", 8000), OAuthCallbackHandler)
+            server.handle_request()
+            
+            tok = server.tok
+            claims = server.claims
+
+            # Build credentials
+            creds = Credentials(
+                tok["access_token"],
+                refresh_token=tok.get("refresh_token"),
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=config.GOOGLE_CLIENT_ID,
+                client_secret=config.GOOGLE_CLIENT_SECRET,
+                scopes=scopes
+            )
+            
+            # Store credentials for later use
+            self.stored_credentials[user_id] = {
+                "email": email,
+                "credentials": creds,
+                "type": "gmail"
+            }
+            
+            # Get profile data from People API
+            people = build("people", "v1", credentials=creds)
+            person = people.people().get(
+                resourceName="people/me",
+                personFields="names,birthdays,genders,addresses,locations,biographies,interests,organizations,residences"
+            ).execute()
+
+            # Extract profile information
+            name = person.get("names", [{}])[0].get("displayName")
+            gender = person.get("genders", [{}])[0].get("value")
+            b = person.get("birthdays", [{}])[0].get("date", {})
+            birthdate = f"{b.get('year','')}-{b.get('month',0):02d}-{b.get('day',0):02d}" if b.get('year') else None
+            
+            # Extract city using AI
+            city = self.extract_city_from_google_data(person)
+            
+            return {
+                "name": name,
+                "gender": gender,
+                "birthdate": birthdate,
+                "city": city,
+                "success": True
+            }
+            
+        except Exception as e:
+            print(f"Error scanning Gmail profile: {e}")
+            return {
+                "name": None,
+                "gender": None,
+                "birthdate": None,
+                "city": None,
+                "success": False,
+                "error": str(e)
+            }
+    
+    def extract_outlook_profile_data(self, access_token: str) -> Dict[str, Any]:
+        """Extract profile data from Microsoft Graph API"""
+        headers = {"Authorization": f"Bearer {access_token}"}
+        
+        profile_data = {
+            "name": None,
+            "gender": None,
+            "birthdate": None,
+            "city": None
+        }
+        
+        try:
+            # Get basic user profile
+            user_response = requests.get(
+                "https://graph.microsoft.com/v1.0/me",
+                headers=headers
+            )
+            
+            if user_response.status_code == 200:
+                user_data = user_response.json()
+                profile_data["name"] = user_data.get("displayName")
+                
+                # Try to get city from office location
+                office_location = user_data.get("officeLocation")
+                if office_location:
+                    city = self.extract_city_with_ai(office_location)
+                    if city:
+                        profile_data["city"] = city
+                
+                # Check other location fields
+                street_address = user_data.get("streetAddress")
+                if street_address and not profile_data["city"]:
+                    city = self.extract_city_with_ai(street_address)
+                    if city:
+                        profile_data["city"] = city
+                
+                city_field = user_data.get("city")
+                if city_field and not profile_data["city"]:
+                    profile_data["city"] = city_field
+                    
+                country = user_data.get("country")
+                if country and not profile_data["city"]:
+                    city = self.extract_city_with_ai(country)
+                    if city:
+                        profile_data["city"] = city
+
+            # Try extended profile information
+            try:
+                profile_response = requests.get(
+                    "https://graph.microsoft.com/v1.0/me/profile",
+                    headers=headers
+                )
+                
+                if profile_response.status_code == 200:
+                    profile_info = profile_response.json()
+                    
+                    if isinstance(profile_info, dict):
+                        for date_field in ['birthdate', 'birthday', 'dateOfBirth']:
+                            if profile_info.get(date_field) and not profile_data["birthdate"]:
+                                profile_data["birthdate"] = profile_info.get(date_field)
+                        
+                        if profile_info.get('gender') and not profile_data["gender"]:
+                            profile_data["gender"] = profile_info.get('gender')
+                            
+                        for location_field in ['location', 'address', 'homeAddress', 'city']:
+                            location_data = profile_info.get(location_field)
+                            if location_data and not profile_data["city"]:
+                                if isinstance(location_data, str):
+                                    city = self.extract_city_with_ai(location_data)
+                                    if city:
+                                        profile_data["city"] = city
+                                elif isinstance(location_data, dict):
+                                    for key, value in location_data.items():
+                                        if isinstance(value, str) and value:
+                                            city = self.extract_city_with_ai(value)
+                                            if city:
+                                                profile_data["city"] = city
+                                                break
+            except Exception:
+                pass
+
+        except Exception as e:
+            print(f"Error extracting Outlook profile: {str(e)}")
+        
+        return profile_data
+    
+    def scan_outlook_profile(self, email: str, user_id: str) -> Dict[str, Any]:
+        """Scan Outlook for profile information using OAuth"""
+        try:
+            if not config.OUTLOOK_CLIENT_ID:
+                return {
+                    "name": None,
+                    "gender": None,
+                    "birthdate": None,
+                    "city": None,
+                    "success": False,
+                    "error": "Outlook Client ID not configured"
+                }
+            
+            # Create MSAL app
+            app = msal.PublicClientApplication(
+                config.OUTLOOK_CLIENT_ID,
+                authority="https://login.microsoftonline.com/common"
+            )
+            
+            scopes = [
+                "User.Read",
+                "Mail.Send",
+                "Calendars.Read"
+            ]
+            
+            # Interactive authentication
+            try:
+                result = app.acquire_token_interactive(
+                    scopes=scopes,
+                    redirect_uri="http://localhost"
+                )
+            except Exception:
+                result = app.acquire_token_interactive(scopes=scopes)
+            
+            if "access_token" not in result:
+                error_msg = result.get("error_description", result.get("error", "Unknown error"))
+                return {
+                    "name": None,
+                    "gender": None,
+                    "birthdate": None,
+                    "city": None,
+                    "success": False,
+                    "error": f"Outlook authentication failed: {error_msg}"
+                }
+
+            # Store credentials
+            self.stored_credentials[user_id] = {
+                "email": email,
+                "credentials": result,
+                "type": "outlook"
+            }
+
+            # Extract profile data
+            profile_data = self.extract_outlook_profile_data(result['access_token'])
+            
+            return {
+                "name": profile_data["name"],
+                "gender": profile_data["gender"],
+                "birthdate": profile_data["birthdate"],
+                "city": profile_data["city"],
+                "success": True
+            }
+                
+        except Exception as e:
+            print(f"Error scanning Outlook profile: {str(e)}")
+            return {
+                "name": None,
+                "gender": None,
+                "birthdate": None,
+                "city": None,
+                "success": False,
+                "error": str(e)
+            }
+    
+    def scan_email_for_profile(self, email: str, user_id: str) -> Dict[str, Any]:
+        """Main method to scan email for profile information"""
+        if email.lower().endswith("@gmail.com"):
+            return self.scan_gmail_profile(email, user_id)
+        else:
+            return self.scan_outlook_profile(email, user_id)
     
     def validate_email_addresses(self, email_string: str) -> List[str]:
-        """
-        Extract and validate email addresses from a string
-        Returns list of valid email addresses
-        """
-        # Regular expression for email validation
+        """Extract and validate email addresses from a string"""
         email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-        
-        # Find all email addresses in the string
         emails = re.findall(email_pattern, email_string)
-        
-        # Remove duplicates and return
         return list(set(emails))
     
     def create_invite_email_content(self, sender_name: str, sender_email: str, group_code: str) -> tuple[str, str]:
@@ -62,15 +460,27 @@ Group Code: {group_code}
         
         return subject, body
     
-    async def send_gmail_invites(self, credentials: Credentials, sender_name: str, 
-                               sender_email: str, recipient_emails: List[str], 
-                               group_code: str) -> Dict[str, Any]:
+    async def send_gmail_invites(self, user_id: str, recipient_emails: List[str], 
+                               group_code: str, sender_name: str = "Arny User") -> Dict[str, Any]:
         """Send group invitations via Gmail API"""
         try:
-            gmail_service = build("gmail", "v1", credentials=credentials)
+            if user_id not in self.stored_credentials:
+                return {
+                    "success": False,
+                    "error": "Gmail credentials not available. Please link your email first."
+                }
+            
+            creds_data = self.stored_credentials[user_id]
+            if creds_data["type"] != "gmail":
+                return {
+                    "success": False,
+                    "error": "Gmail credentials not found for this user."
+                }
+            
+            gmail_service = build("gmail", "v1", credentials=creds_data["credentials"])
             
             # Create email content
-            subject, body = self.create_invite_email_content(sender_name, sender_email, group_code)
+            subject, body = self.create_invite_email_content(sender_name, creds_data["email"], group_code)
             
             successful_sends = []
             failed_sends = []
@@ -80,7 +490,7 @@ Group Code: {group_code}
                     # Create message
                     message = email.mime.text.MIMEText(body)
                     message['to'] = recipient_email
-                    message['from'] = sender_email
+                    message['from'] = creds_data["email"]
                     message['subject'] = subject
                     
                     # Encode message
@@ -109,15 +519,27 @@ Group Code: {group_code}
                 "error": f"Gmail service error: {str(e)}"
             }
     
-    async def send_outlook_invites(self, access_token: str, sender_name: str, 
-                                 sender_email: str, recipient_emails: List[str], 
-                                 group_code: str) -> Dict[str, Any]:
+    async def send_outlook_invites(self, user_id: str, recipient_emails: List[str], 
+                                 group_code: str, sender_name: str = "Arny User") -> Dict[str, Any]:
         """Send group invitations via Microsoft Graph API"""
         try:
-            headers = {"Authorization": f"Bearer {access_token}"}
+            if user_id not in self.stored_credentials:
+                return {
+                    "success": False,
+                    "error": "Outlook credentials not available. Please link your email first."
+                }
+            
+            creds_data = self.stored_credentials[user_id]
+            if creds_data["type"] != "outlook":
+                return {
+                    "success": False,
+                    "error": "Outlook credentials not found for this user."
+                }
+            
+            headers = {"Authorization": f"Bearer {creds_data['credentials']['access_token']}"}
             
             # Create email content
-            subject, body = self.create_invite_email_content(sender_name, sender_email, group_code)
+            subject, body = self.create_invite_email_content(sender_name, creds_data["email"], group_code)
             
             successful_sends = []
             failed_sends = []
@@ -172,22 +594,9 @@ Group Code: {group_code}
                 "error": f"Outlook service error: {str(e)}"
             }
     
-    async def send_group_invites(self, email_type: str, credentials: Any, sender_name: str,
-                               sender_email: str, email_addresses: str, group_code: str) -> Dict[str, Any]:
-        """
-        Main method to send group invitation emails
-        
-        Args:
-            email_type: "gmail" or "outlook"
-            credentials: Email service credentials
-            sender_name: Name of the person sending invites
-            sender_email: Email of the person sending invites
-            email_addresses: String containing email addresses
-            group_code: Group code to include in invite
-            
-        Returns:
-            Result dictionary with success status and details
-        """
+    async def send_group_invites(self, user_id: str, email_addresses: str, group_code: str, 
+                               sender_name: str = "Arny User") -> Dict[str, Any]:
+        """Main method to send group invitation emails"""
         # Validate and extract email addresses
         valid_emails = self.validate_email_addresses(email_addresses)
         
@@ -197,19 +606,23 @@ Group Code: {group_code}
                 "error": "No valid email addresses found in the input."
             }
         
+        if user_id not in self.stored_credentials:
+            return {
+                "success": False,
+                "error": "Email credentials not available. Please link your email first."
+            }
+        
+        creds_data = self.stored_credentials[user_id]
+        
         # Send invites based on email type
-        if email_type == "gmail":
-            result = await self.send_gmail_invites(
-                credentials, sender_name, sender_email, valid_emails, group_code
-            )
-        elif email_type == "outlook":
-            result = await self.send_outlook_invites(
-                credentials, sender_name, sender_email, valid_emails, group_code
-            )
+        if creds_data["type"] == "gmail":
+            result = await self.send_gmail_invites(user_id, valid_emails, group_code, sender_name)
+        elif creds_data["type"] == "outlook":
+            result = await self.send_outlook_invites(user_id, valid_emails, group_code, sender_name)
         else:
             return {
                 "success": False,
-                "error": f"Unsupported email type: {email_type}"
+                "error": f"Unsupported email type: {creds_data['type']}"
             }
         
         # Format response
