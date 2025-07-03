@@ -98,6 +98,186 @@ def scan_email_for_profile_tool(email: str) -> dict:
         }
 
 @function_tool
+def store_personal_info_tool(name: str = None, gender: str = None, birthdate: str = None, city: str = None) -> dict:
+    """
+    Store personal information from user input
+    
+    Args:
+        name: User's full name
+        gender: User's gender 
+        birthdate: User's birthdate in YYYY-MM-DD format
+        city: User's city
+        
+    Returns:
+        Dict with success status and stored information
+    """
+    try:
+        agent = _get_onboarding_agent()
+        if not agent:
+            return {"success": False, "error": "Agent not available"}
+        
+        print(f"💾 Storing personal info: name={name}, gender={gender}, birthdate={birthdate}, city={city}")
+        
+        # Store non-empty values in collected data
+        if name:
+            agent.current_collected_data["name"] = name
+        if gender:
+            agent.current_collected_data["gender"] = gender
+        if birthdate:
+            agent.current_collected_data["birthdate"] = birthdate
+        if city:
+            agent.current_collected_data["city"] = city
+        
+        print(f"📈 Updated collected data: {agent.current_collected_data}")
+        
+        # Check what we have collected so far
+        collected_fields = []
+        if agent.current_collected_data.get("name"):
+            collected_fields.append(f"name: {agent.current_collected_data['name']}")
+        if agent.current_collected_data.get("gender"):
+            collected_fields.append(f"gender: {agent.current_collected_data['gender']}")
+        if agent.current_collected_data.get("birthdate"):
+            collected_fields.append(f"birthdate: {agent.current_collected_data['birthdate']}")
+        if agent.current_collected_data.get("city"):
+            collected_fields.append(f"city: {agent.current_collected_data['city']}")
+        
+        return {
+            "success": True,
+            "message": f"Stored personal information: {', '.join(collected_fields)}",
+            "collected_fields": collected_fields
+        }
+        
+    except Exception as e:
+        print(f"Error in store_personal_info_tool: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+@function_tool
+def store_job_details_tool(employer: str = None, working_schedule: str = None, holiday_frequency: str = None) -> dict:
+    """
+    Store job details from user input
+    
+    Args:
+        employer: User's employer/company name
+        working_schedule: User's working schedule
+        holiday_frequency: How often user takes holidays per year
+        
+    Returns:
+        Dict with success status and stored information
+    """
+    try:
+        agent = _get_onboarding_agent()
+        if not agent:
+            return {"success": False, "error": "Agent not available"}
+        
+        print(f"💼 Storing job details: employer={employer}, schedule={working_schedule}, holidays={holiday_frequency}")
+        
+        # Store non-empty values in collected data
+        if employer:
+            agent.current_collected_data["employer"] = employer
+        if working_schedule:
+            agent.current_collected_data["working_schedule"] = working_schedule
+        if holiday_frequency:
+            agent.current_collected_data["holiday_frequency"] = holiday_frequency
+        
+        print(f"📈 Updated collected data: {agent.current_collected_data}")
+        
+        # Check what we have collected so far
+        collected_fields = []
+        if agent.current_collected_data.get("employer"):
+            collected_fields.append(f"employer: {agent.current_collected_data['employer']}")
+        if agent.current_collected_data.get("working_schedule"):
+            collected_fields.append(f"schedule: {agent.current_collected_data['working_schedule']}")
+        if agent.current_collected_data.get("holiday_frequency"):
+            collected_fields.append(f"holidays: {agent.current_collected_data['holiday_frequency']}")
+        
+        return {
+            "success": True,
+            "message": f"Stored job details: {', '.join(collected_fields)}",
+            "collected_fields": collected_fields
+        }
+        
+    except Exception as e:
+        print(f"Error in store_job_details_tool: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+@function_tool
+def store_financial_info_tool(annual_income: str = None, monthly_spending: str = None) -> dict:
+    """
+    Store financial information from user input
+    
+    Args:
+        annual_income: User's annual income range
+        monthly_spending: User's average monthly spending
+        
+    Returns:
+        Dict with success status and stored information
+    """
+    try:
+        agent = _get_onboarding_agent()
+        if not agent:
+            return {"success": False, "error": "Agent not available"}
+        
+        print(f"💰 Storing financial info: income={annual_income}, spending={monthly_spending}")
+        
+        # Store non-empty values in collected data
+        if annual_income:
+            agent.current_collected_data["annual_income"] = annual_income
+        if monthly_spending:
+            agent.current_collected_data["monthly_spending"] = monthly_spending
+        
+        print(f"📈 Updated collected data: {agent.current_collected_data}")
+        
+        # Check what we have collected so far
+        collected_fields = []
+        if agent.current_collected_data.get("annual_income"):
+            collected_fields.append(f"income: {agent.current_collected_data['annual_income']}")
+        if agent.current_collected_data.get("monthly_spending"):
+            collected_fields.append(f"spending: {agent.current_collected_data['monthly_spending']}")
+        
+        return {
+            "success": True,
+            "message": f"Stored financial information: {', '.join(collected_fields)}",
+            "collected_fields": collected_fields
+        }
+        
+    except Exception as e:
+        print(f"Error in store_financial_info_tool: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+@function_tool
+def store_holiday_preferences_tool(holiday_preferences: str) -> dict:
+    """
+    Store holiday preferences from user input
+    
+    Args:
+        holiday_preferences: User's holiday/travel activity preferences
+        
+    Returns:
+        Dict with success status and stored information
+    """
+    try:
+        agent = _get_onboarding_agent()
+        if not agent:
+            return {"success": False, "error": "Agent not available"}
+        
+        print(f"🏖️ Storing holiday preferences: {holiday_preferences}")
+        
+        # Store holiday preferences in collected data
+        agent.current_collected_data["holiday_preferences"] = holiday_preferences
+        
+        print(f"📈 Updated collected data: {agent.current_collected_data}")
+        
+        return {
+            "success": True,
+            "message": f"Stored holiday preferences: {holiday_preferences}",
+            "preferences": holiday_preferences
+        }
+        
+    except Exception as e:
+        print(f"Error in store_holiday_preferences_tool: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+@function_tool
 def send_group_invites_tool(email_addresses: str) -> dict:
     """
     Send group invitation emails
@@ -119,6 +299,10 @@ def send_group_invites_tool(email_addresses: str) -> dict:
         
         if not valid_emails:
             return {"success": False, "error": "No valid email addresses found"}
+        
+        # Mark invites as sent
+        agent.current_collected_data["group_invites_sent"] = True
+        agent.current_collected_data["invited_emails"] = valid_emails
         
         # For now, simulate successful sending
         # In production, this would use the full email service
@@ -290,10 +474,11 @@ class OnboardingAgent:
     LLM-driven onboarding agent using OpenAI Agents SDK with tools - FIXED VERSION
     
     Fixed Issues:
-    1. Proper conversation state management
-    2. Better progress tracking and continuation
-    3. Improved step detection and flow control
-    4. Hidden group code when skipping group setup
+    1. Added tools for collecting and storing user information
+    2. Proper conversation state management
+    3. Better progress tracking and continuation
+    4. Improved step detection and flow control
+    5. Hidden group code when skipping group setup
     """
     
     def __init__(self):
@@ -329,13 +514,17 @@ class OnboardingAgent:
                 "Could you please provide these missing details?' Only if NO information is extracted at all should you "
                 "ask for all details manually.\n\n"
                 "3. PERSONAL INFO:\n"
-                "   Collect: name, gender, birthdate, city. Ask for any missing details and confirm when complete.\n\n"
+                "   Collect: name, gender, birthdate, city. When the user provides this information, use store_personal_info_tool to save it. "
+                "Ask for any missing details and confirm when complete.\n\n"
                 "4. JOB DETAILS:\n"
-                "   Ask about: employer, working schedule, holiday frequency. Prompt for missing items until complete, then confirm.\n\n"
+                "   Ask about: employer, working schedule, holiday frequency. When the user provides this information, use store_job_details_tool to save it. "
+                "Prompt for missing items until complete, then confirm.\n\n"
                 "5. FINANCIAL INFO:\n"
-                "   Ask about: annual income range, average monthly spending amount. Prompt until complete, then confirm.\n\n"
+                "   Ask about: annual income range, average monthly spending amount. When the user provides this information, use store_financial_info_tool to save it. "
+                "Prompt until complete, then confirm.\n\n"
                 "6. HOLIDAY PREFERENCES:\n"
-                "   Ask about: holiday activities the user likes to do. Prompt until complete, then confirm.\n\n"
+                "   Ask about: holiday activities the user likes to do. When the user provides this information, use store_holiday_preferences_tool to save it. "
+                "Prompt until complete, then confirm.\n\n"
                 "7. GROUP INVITATIONS (ONLY if user has group_role = 'admin'):\n"
                 "   - If the user joined an existing group (group_role = 'member'), SKIP this step entirely.\n"
                 "   - If the user skipped group setup (group_role = 'admin'), ask: 'Would you like to setup a group with people you know? This can always be done later.' "
@@ -347,11 +536,16 @@ class OnboardingAgent:
                 "Always be friendly, conversational, and helpful. Keep track of what information you've already collected to avoid asking the same questions twice. "
                 "DO NOT call the same tool multiple times in one response. "
                 "CONTINUE FROM WHERE THE CONVERSATION LEFT OFF - check collected data to see what step to proceed with. "
-                "NEVER reveal specific group codes to users when they skip group setup."
+                "NEVER reveal specific group codes to users when they skip group setup. "
+                "ALWAYS use the appropriate store_*_tool when users provide information to ensure it gets saved."
             ),
             model="o4-mini",
             tools=[
                 scan_email_for_profile_tool,
+                store_personal_info_tool,
+                store_job_details_tool,
+                store_financial_info_tool,
+                store_holiday_preferences_tool,
                 send_group_invites_tool,
                 validate_group_code_tool,
                 skip_group_setup_tool
