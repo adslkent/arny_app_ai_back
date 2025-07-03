@@ -614,7 +614,7 @@ class OnboardingAgent:
                 conversation_history = conversation_history[-20:]
             
             # Check if onboarding is complete
-            onboarding_complete = "thank you, this completes your onboarding to arny" in assistant_message.lower()
+            onboarding_complete = self._detect_onboarding_completion(assistant_message)
             
             # Update progress
             updated_progress = {
@@ -653,6 +653,28 @@ class OnboardingAgent:
                 "error": str(e)
             }
     
+    def _detect_onboarding_completion(self, message: str) -> bool:
+        """Detect if the agent has completed onboarding with flexible phrase matching"""
+        message_lower = message.lower()
+    
+        # Key phrases that indicate completion
+        completion_phrases = [
+            "this completes your onboarding to arny",
+            "completes your onboarding to arny", 
+            "your onboarding to arny is complete",
+            "onboarding to arny is now complete",
+            "thank you, this completes your onboarding",
+            "that completes your onboarding"
+        ]
+    
+        # Check if any completion phrase is found
+        for phrase in completion_phrases:
+            if phrase in message_lower:
+                return True
+    
+        return False
+
+
     def _determine_current_step_from_data(self, collected_data: Dict[str, Any]) -> str:
         """Determine current step based on collected data for progress summary"""
         
