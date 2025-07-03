@@ -5,6 +5,7 @@ Fixed Issues:
 1. Consistent UUID validation across all methods
 2. Better error handling for UUID validation
 3. Improved progress loading and saving with better JSON handling
+4. FIXED: Better session_id handling in conversation methods
 """
 
 from typing import Optional, Dict, Any, List, Union, Tuple
@@ -47,18 +48,21 @@ class DatabaseOperations:
             logger.error(f"Failed to initialize database client: {e}")
             raise ConnectionError(f"Database connection failed: {e}")
     
-    def _validate_and_format_uuid(self, user_id: str) -> tuple[bool, str]:
+    def _validate_and_format_uuid(self, user_id: str, field_name: str = "UUID") -> tuple[bool, str]:
         """
-        Consistent UUID validation and formatting across all methods
+        FIXED: Consistent UUID validation and formatting across all methods with better error messages
         
         Args:
             user_id: User ID to validate
+            field_name: Name of the field being validated (for better error messages)
             
         Returns:
             Tuple of (is_valid, cleaned_user_id or error_message)
         """
         if not user_id:
-            return False, "User ID cannot be empty"
+            error_msg = f"{field_name} cannot be empty"
+            logger.warning(error_msg)
+            return False, error_msg
         
         try:
             # Convert to string and strip whitespace
@@ -71,12 +75,18 @@ class DatabaseOperations:
             uuid_obj = uuid.UUID(user_id_str)
             
             # Return the string representation to ensure consistency
-            return True, str(uuid_obj)
+            validated_uuid = str(uuid_obj)
+            logger.debug(f"✅ {field_name} validated: {validated_uuid}")
+            return True, validated_uuid
             
         except ValueError as e:
-            return False, f"Invalid UUID format: {e}"
+            error_msg = f"Invalid {field_name} format: {e}"
+            logger.warning(error_msg)
+            return False, error_msg
         except Exception as e:
-            return False, f"Unexpected validation error: {e}"
+            error_msg = f"Unexpected {field_name} validation error: {e}"
+            logger.error(error_msg)
+            return False, error_msg
     
     # ==================== USER PROFILE OPERATIONS ====================
     
@@ -86,7 +96,7 @@ class DatabaseOperations:
         """
         try:
             # Use consistent UUID validation
-            is_valid, validated_user_id = self._validate_and_format_uuid(user_id)
+            is_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
             if not is_valid:
                 logger.warning(f"Invalid user_id format in get_user_profile: {validated_user_id}")
                 return None
@@ -113,7 +123,7 @@ class DatabaseOperations:
         """
         try:
             # Validate the user_id in the profile
-            is_valid, validated_user_id = self._validate_and_format_uuid(profile.user_id)
+            is_valid, validated_user_id = self._validate_and_format_uuid(profile.user_id, "user_id")
             if not is_valid:
                 logger.error(f"Invalid user_id in profile: {validated_user_id}")
                 return False
@@ -154,7 +164,7 @@ class DatabaseOperations:
         """
         try:
             # Use consistent UUID validation
-            is_valid, validated_user_id = self._validate_and_format_uuid(user_id)
+            is_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
             if not is_valid:
                 logger.error(f"Invalid user_id format in update_user_profile: {validated_user_id}")
                 return False
@@ -252,7 +262,7 @@ class DatabaseOperations:
         """
         try:
             # Use consistent UUID validation
-            is_valid, validated_user_id = self._validate_and_format_uuid(user_id)
+            is_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
             if not is_valid:
                 logger.warning(f"Invalid user_id format in get_onboarding_progress: {validated_user_id}")
                 return None
@@ -299,7 +309,7 @@ class DatabaseOperations:
         """
         try:
             # Use consistent UUID validation
-            is_valid, validated_user_id = self._validate_and_format_uuid(user_id)
+            is_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
             if not is_valid:
                 logger.error(f"Invalid user_id format in update_onboarding_progress: {validated_user_id}")
                 return False
@@ -363,7 +373,7 @@ class DatabaseOperations:
         """
         try:
             # Use consistent UUID validation
-            is_valid, validated_user_id = self._validate_and_format_uuid(user_id)
+            is_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
             if not is_valid:
                 logger.error(f"Invalid user_id format in add_group_member: {validated_user_id}")
                 return False
@@ -405,7 +415,7 @@ class DatabaseOperations:
         """
         try:
             # Use consistent UUID validation
-            is_valid, validated_user_id = self._validate_and_format_uuid(user_id)
+            is_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
             if not is_valid:
                 logger.error(f"Invalid user_id format in remove_group_member: {validated_user_id}")
                 return False
@@ -471,7 +481,7 @@ class DatabaseOperations:
         """
         try:
             # Use consistent UUID validation
-            is_valid, validated_user_id = self._validate_and_format_uuid(user_id)
+            is_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
             if not is_valid:
                 logger.warning(f"Invalid user_id format in get_user_groups: {validated_user_id}")
                 return []
@@ -497,7 +507,7 @@ class DatabaseOperations:
         """
         try:
             # Use consistent UUID validation
-            is_valid, validated_user_id = self._validate_and_format_uuid(user_id)
+            is_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
             if not is_valid:
                 logger.warning(f"Invalid user_id format in get_user_status: {validated_user_id}")
                 return None
@@ -533,14 +543,31 @@ class DatabaseOperations:
             logger.error(f"Error getting user status for {user_id}: {e}")
             return None  # Return None instead of raising exception
     
-    # ==================== CHAT OPERATIONS ====================
+    # ==================== CHAT OPERATIONS - FIXED ====================
     
     async def save_chat_message(self, message: ChatMessage) -> bool:
         """
-        Save a chat message
+        Save a chat message - FIXED VERSION with better validation
         """
         try:
-            logger.info(f"Saving chat message for user: {message.user_id}")
+            # FIXED: Validate required fields before saving
+            if not message.user_id:
+                logger.error("Cannot save chat message: user_id is missing")
+                return False
+            
+            if not message.session_id:
+                logger.error("Cannot save chat message: session_id is missing")
+                return False
+            
+            # Validate UUIDs
+            user_valid, _ = self._validate_and_format_uuid(message.user_id, "user_id")
+            session_valid, _ = self._validate_and_format_uuid(message.session_id, "session_id")
+            
+            if not user_valid or not session_valid:
+                logger.error(f"Cannot save chat message: invalid UUID format")
+                return False
+            
+            logger.info(f"Saving chat message for user: {message.user_id}, session: {message.session_id}")
             
             message_dict = message.dict()
             message_dict["created_at"] = datetime.utcnow().isoformat()
@@ -554,6 +581,8 @@ class DatabaseOperations:
             success = len(response.data) > 0
             if success:
                 logger.info(f"Chat message saved successfully for user: {message.user_id}")
+            else:
+                logger.error(f"Failed to save chat message for user: {message.user_id}")
             
             return success
             
@@ -563,15 +592,19 @@ class DatabaseOperations:
     
     async def get_conversation_history(self, user_id: str, session_id: str, limit: int = 50) -> List[ChatMessage]:
         """
-        Get conversation history for a session - FIXED VERSION
+        Get conversation history for a session - FIXED VERSION with better error handling
         """
         try:
-            # Use consistent UUID validation
-            is_valid_user, validated_user_id = self._validate_and_format_uuid(user_id)
-            is_valid_session, validated_session_id = self._validate_and_format_uuid(session_id)
+            # FIXED: Better UUID validation with specific field names
+            is_valid_user, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
+            is_valid_session, validated_session_id = self._validate_and_format_uuid(session_id, "session_id")
             
-            if not is_valid_user or not is_valid_session:
-                logger.warning(f"Invalid UUID format in get_conversation_history")
+            if not is_valid_user:
+                logger.warning(f"Invalid user_id format in get_conversation_history: {user_id}")
+                return []
+                
+            if not is_valid_session:
+                logger.warning(f"Invalid session_id format in get_conversation_history: {session_id}")
                 return []
             
             logger.info(f"Getting conversation history for user: {validated_user_id}, session: {validated_session_id}")
@@ -605,14 +638,29 @@ class DatabaseOperations:
     async def save_conversation_turn(self, user_id: str, session_id: str, user_message: str, 
                                    assistant_response: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """
-        Save a complete conversation turn (user message + assistant response)
+        Save a complete conversation turn (user message + assistant response) - FIXED VERSION
         """
         try:
+            # FIXED: Validate inputs before creating ChatMessage objects
+            if not user_id or not session_id:
+                logger.error(f"Cannot save conversation: user_id or session_id is missing")
+                return False
+            
+            # Validate UUIDs
+            user_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
+            session_valid, validated_session_id = self._validate_and_format_uuid(session_id, "session_id")
+            
+            if not user_valid or not session_valid:
+                logger.error(f"Cannot save conversation: invalid UUID format")
+                return False
+            
+            logger.info(f"Saving conversation turn for user: {validated_user_id}, session: {validated_session_id}")
+            
             # Save user message
             user_msg = ChatMessage(
                 id=str(uuid.uuid4()),
-                user_id=user_id,
-                session_id=session_id,
+                user_id=validated_user_id,
+                session_id=validated_session_id,
                 message_type=MessageType.USER,
                 content=user_message,
                 metadata=metadata or {}
@@ -621,8 +669,8 @@ class DatabaseOperations:
             # Save assistant message
             assistant_msg = ChatMessage(
                 id=str(uuid.uuid4()),
-                user_id=user_id,
-                session_id=session_id,
+                user_id=validated_user_id,
+                session_id=validated_session_id,
                 message_type=MessageType.ASSISTANT,
                 content=assistant_response,
                 metadata=metadata or {}
@@ -634,7 +682,9 @@ class DatabaseOperations:
             
             success = user_saved and assistant_saved
             if success:
-                logger.info(f"Conversation turn saved successfully for user: {user_id}")
+                logger.info(f"Conversation turn saved successfully for user: {validated_user_id}")
+            else:
+                logger.error(f"Failed to save conversation turn for user: {validated_user_id}")
             
             return success
             
@@ -714,7 +764,7 @@ class DatabaseOperations:
         """
         try:
             # Use consistent UUID validation
-            is_valid, validated_user_id = self._validate_and_format_uuid(user_id)
+            is_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
             if not is_valid:
                 logger.warning(f"Invalid user_id format in get_user_preferences: {validated_user_id}")
                 return None
