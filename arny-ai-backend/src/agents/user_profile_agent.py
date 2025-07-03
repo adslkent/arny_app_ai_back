@@ -48,7 +48,7 @@ class UserProfileAgent:
     async def filter_flight_results(self, user_id: str, flight_results: List[Dict[str, Any]], 
                                   search_params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Filter flight search results based on group preferences
+        Filter flight search results based on group preferences - ENHANCED WITH DEBUG LOGGING
         
         Args:
             user_id: ID of user who initiated the search
@@ -61,10 +61,44 @@ class UserProfileAgent:
         try:
             logger.info(f"Filtering flight results for user {user_id}")
             
+            # DEBUG: Log all original results
+            print(f"🔍 DEBUG: Original {len(flight_results)} flight results BEFORE filtering:")
+            for i, flight_offer in enumerate(flight_results, 1):
+                price = flight_offer.get("price", {})
+                itineraries = flight_offer.get("itineraries", [])
+                
+                print(f"   Flight {i}: ID {flight_offer.get('id', 'Unknown')}")
+                print(f"   - Price: {price.get('currency', '')} {price.get('total', 'N/A')}")
+                
+                if itineraries:
+                    first_itinerary = itineraries[0]
+                    duration = first_itinerary.get("duration", "N/A")
+                    segments = first_itinerary.get("segments", [])
+                    
+                    print(f"   - Duration: {duration}")
+                    print(f"   - Segments: {len(segments)}")
+                    
+                    if segments:
+                        first_segment = segments[0]
+                        carrier = first_segment.get("carrierCode", "N/A")
+                        flight_number = first_segment.get("number", "N/A")
+                        departure = first_segment.get("departure", {})
+                        arrival = first_segment.get("arrival", {})
+                        
+                        print(f"   - Airline: {carrier}{flight_number}")
+                        print(f"   - Route: {departure.get('iataCode', 'N/A')} → {arrival.get('iataCode', 'N/A')}")
+                        
+                        departure_time = departure.get("at", "").split("T")[-1][:5] if departure.get("at") else "N/A"
+                        arrival_time = arrival.get("at", "").split("T")[-1][:5] if arrival.get("at") else "N/A"
+                        print(f"   - Times: {departure_time} → {arrival_time}")
+                
+                print()
+
             # Get group member profiles
             group_profiles = await self._get_group_profiles(user_id)
             
             if not group_profiles:
+                print(f"🔍 DEBUG: No group filtering applied - single user or no group found")
                 # No group or single user - return original results
                 return {
                     "filtered_results": flight_results,
@@ -77,20 +111,56 @@ class UserProfileAgent:
             # Create group analysis prompt
             group_summary = self._create_group_summary(group_profiles)
             
+            print(f"🔍 DEBUG: Group filtering applied for {len(group_profiles)} group members:")
+            print(f"   - Group size: {len(group_profiles)}")
+            print(f"   - Budget ranges: {group_summary.get('budget_ranges', [])}")
+            print(f"   - Travel styles: {group_summary.get('travel_styles', [])}")
+            print(f"   - Preferred airlines: {group_summary.get('preferred_airlines', [])}")
+            print(f"   - Dietary restrictions: {group_summary.get('dietary_restrictions', [])}")
+            print(f"   - Accessibility needs: {group_summary.get('accessibility_needs', [])}")
+
             # Filter flights using AI
             filtered_results = await self._ai_filter_flights(
                 flight_results, group_summary, search_params
             )
             
+            # DEBUG: Log filtering results
+            recommended_flights = filtered_results.get("recommended_flights", flight_results)
+            excluded_count = len(flight_results) - len(recommended_flights)
+            
+            print(f"🔍 DEBUG: Filtering results:")
+            print(f"   - Original count: {len(flight_results)}")
+            print(f"   - Filtered count: {len(recommended_flights)}")
+            print(f"   - Excluded count: {excluded_count}")
+            print(f"   - Filtering rationale: {filtered_results.get('filtering_rationale', 'N/A')}")
+            
+            if excluded_count > 0:
+                print(f"🔍 DEBUG: Flights that were EXCLUDED by filtering:")
+                excluded_flights = []
+                recommended_ids = [f.get('id', '') for f in recommended_flights]
+                
+                for i, flight_offer in enumerate(flight_results, 1):
+                    flight_id = flight_offer.get("id", "")
+                    if flight_id not in recommended_ids:
+                        price = flight_offer.get("price", {})
+                        excluded_flights.append((i, flight_id, flight_offer))
+                        print(f"   ❌ Flight {i}: ID {flight_id} - {price.get('currency', '')} {price.get('total', 'N/A')}")
+                
+                print(f"🔍 DEBUG: Recommended flights that PASSED filtering:")
+                for i, flight_offer in enumerate(recommended_flights, 1):
+                    flight_id = flight_offer.get("id", "")
+                    price = flight_offer.get("price", {})
+                    print(f"   ✅ Flight {i}: ID {flight_id} - {price.get('currency', '')} {price.get('total', 'N/A')}")
+
             return {
-                "filtered_results": filtered_results.get("recommended_flights", flight_results),
+                "filtered_results": recommended_flights,
                 "original_count": len(flight_results),
-                "filtered_count": len(filtered_results.get("recommended_flights", flight_results)),
+                "filtered_count": len(recommended_flights),
                 "filtering_applied": True,
                 "rationale": filtered_results.get("filtering_rationale", "AI filtering applied"),
                 "group_size": len(group_profiles),
                 "group_preferences": filtered_results.get("group_considerations", {}),
-                "excluded_count": filtered_results.get("excluded_count", 0)
+                "excluded_count": excluded_count
             }
             
         except Exception as e:
