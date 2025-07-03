@@ -13,8 +13,9 @@ class OnboardingHandler:
     
     Fixed Issues:
     1. Better error handling for database operations
-    2. Proper loading of existing onboarding progress
-    3. Improved session continuity
+    2. Proper loading of existing onboarding progress with JSON validation
+    3. Improved session continuity with better error handling
+    4. Fixed Pydantic validation errors for OnboardingProgress
     """
     
     def __init__(self):
@@ -109,7 +110,7 @@ class OnboardingHandler:
                 print(f"Note: Could not check user status (user may be new): {status_error}")
                 # Continue with onboarding even if status check fails
             
-            # Get user's onboarding progress - with better error handling and proper loading
+            # Get user's onboarding progress - FIXED with better error handling and JSON validation
             progress_data = {
                 'collected_data': {},
                 'conversation_history': []
@@ -121,26 +122,34 @@ class OnboardingHandler:
                 if onboarding_progress:
                     print(f"📥 Found existing onboarding progress for user {user_id}")
                     
-                    # Extract conversation history and collected data from stored progress
+                    # FIXED: Better handling of collected_data from database
                     try:
-                        stored_data = onboarding_progress.collected_data or {}
-                        if isinstance(stored_data, str):
-                            stored_data = json.loads(stored_data)
-                        
-                        # Properly extract the nested structure
+                        stored_data = onboarding_progress.collected_data
                         if isinstance(stored_data, dict):
+                            # Data is already parsed as dict (good case)
                             progress_data['collected_data'] = stored_data.get('collected_data', {})
                             progress_data['conversation_history'] = stored_data.get('conversation_history', [])
                             progress_data['current_step'] = onboarding_progress.current_step.value
-                            
-                            print(f"📊 Loaded progress: {len(progress_data['conversation_history'])} messages, {len(progress_data['collected_data'])} data fields")
-                            print(f"🎯 Current step: {progress_data.get('current_step', 'unknown')}")
-                            print(f"📋 Collected data keys: {list(progress_data['collected_data'].keys())}")
+                        elif isinstance(stored_data, str):
+                            # Data needs parsing from JSON string
+                            try:
+                                parsed_data = json.loads(stored_data)
+                                if isinstance(parsed_data, dict):
+                                    progress_data['collected_data'] = parsed_data.get('collected_data', {})
+                                    progress_data['conversation_history'] = parsed_data.get('conversation_history', [])
+                                    progress_data['current_step'] = onboarding_progress.current_step.value
+                                else:
+                                    print("⚠️ Parsed data is not dict format, starting fresh")
+                            except json.JSONDecodeError as json_error:
+                                print(f"⚠️ JSON decode error: {json_error}, starting fresh")
                         else:
-                            print("⚠️  Stored data is not in expected format, starting fresh")
+                            print("⚠️ Stored data is in unexpected format, starting fresh")
                             
-                    except (json.JSONDecodeError, AttributeError) as parse_error:
-                        print(f"Warning: Could not parse progress data: {parse_error}")
+                        print(f"📊 Loaded progress: {len(progress_data['conversation_history'])} messages, {len(progress_data['collected_data'])} data fields")
+                        print(f"🎯 Current step: {progress_data.get('current_step', 'unknown')}")
+                        print(f"📋 Collected data keys: {list(progress_data['collected_data'].keys())}")
+                    except Exception as parse_error:
+                        print(f"Warning: Could not parse progress data properly: {parse_error}")
                         # Continue with empty progress data
                 else:
                     print(f"📄 No existing progress found for user {user_id}, starting fresh")
