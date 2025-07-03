@@ -41,14 +41,29 @@ class MainHandler:
             # Extract key information
             user_id = body.get('user_id')
             message = body.get('message')
-            session_id = body.get('session_id', str(uuid.uuid4()))
+            session_id = body.get('session_id')  # Can be None
             access_token = body.get('access_token')
+            
+            print(f"🔍 Request received - user_id: {user_id}, session_id: {session_id}, message: {message[:50]}...")
             
             if not user_id or not message:
                 return self._error_response(400, "Missing user_id or message")
             
             if not access_token:
                 return self._error_response(401, "Missing access_token")
+            
+            # FIXED: Ensure session_id is always a valid UUID string
+            if not session_id:
+                session_id = str(uuid.uuid4())
+                print(f"📝 Generated new session_id: {session_id}")
+            else:
+                # Validate existing session_id
+                try:
+                    uuid.UUID(session_id)  # Validate it's a proper UUID
+                    print(f"✅ Using existing session_id: {session_id}")
+                except ValueError:
+                    session_id = str(uuid.uuid4())
+                    print(f"⚠️ Invalid session_id provided, generated new one: {session_id}")
             
             # Verify user authentication
             auth_result = await self.auth.verify_token(access_token)
@@ -60,7 +75,15 @@ class MainHandler:
             if not user_profile:
                 return self._error_response(404, "User profile not found")
             
-            conversation_history = await self.db.get_conversation_history(user_id, session_id)
+            print(f"👤 User profile found: {user_profile.email}")
+            
+            # FIXED: Better error handling for conversation history
+            try:
+                conversation_history = await self.db.get_conversation_history(user_id, session_id)
+                print(f"💬 Retrieved {len(conversation_history)} previous messages")
+            except Exception as e:
+                print(f"⚠️ Error getting conversation history: {e}, continuing with empty history")
+                conversation_history = []
             
             # Process message through supervisor agent first
             supervisor_response = await self.supervisor_agent.process_message(
@@ -70,6 +93,8 @@ class MainHandler:
                 user_profile=user_profile.model_dump(),
                 conversation_history=conversation_history
             )
+            
+            print(f"🤖 Supervisor response - agent_type: {supervisor_response.get('agent_type')}")
             
             # Check if we need to route to a specific agent
             if supervisor_response.get("requires_routing"):
@@ -104,20 +129,30 @@ class MainHandler:
                 # Use supervisor response directly
                 agent_response = supervisor_response
             
-            # Save conversation to database
-            await self.db.save_conversation_turn(
-                user_id=user_id,
-                session_id=session_id,
-                user_message=message,
-                assistant_response=agent_response.get('message', ''),
-                metadata=agent_response.get('metadata', {})
-            )
+            # FIXED: Ensure session_id is not None before saving
+            if not session_id:
+                session_id = str(uuid.uuid4())
+                print(f"⚠️ session_id was None before saving, generated: {session_id}")
+            
+            # Save conversation to database with better error handling
+            try:
+                await self.db.save_conversation_turn(
+                    user_id=user_id,
+                    session_id=session_id,
+                    user_message=message,
+                    assistant_response=agent_response.get('message', ''),
+                    metadata=agent_response.get('metadata', {})
+                )
+                print("💾 Conversation saved successfully")
+            except Exception as e:
+                print(f"⚠️ Error saving conversation: {e}, continuing with response")
+                # Don't fail the request if saving fails
             
             # Format response
             response_data = {
                 'response': agent_response.get('message'),
                 'agent_type': agent_response.get('agent_type', 'main_travel'),
-                'session_id': session_id,
+                'session_id': session_id,  # Always return the session_id
                 'requires_action': agent_response.get('requires_action', False)
             }
             
@@ -139,10 +174,13 @@ class MainHandler:
             if agent_response.get('metadata'):
                 response_data['metadata'] = agent_response['metadata']
             
+            print(f"✅ Request completed successfully")
             return self._success_response(response_data)
             
         except Exception as e:
-            print(f"Error in main handler: {str(e)}")
+            print(f"❌ Error in main handler: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return self._error_response(500, "Internal server error")
     
     async def handle_auth_request(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
