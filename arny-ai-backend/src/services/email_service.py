@@ -88,6 +88,8 @@ class EmailService:
             return None
         
         try:
+            print(f"🧠 AI extracting city from: '{address_text}'")
+            
             input_prompt = f"""Extract ONLY the city name from this address: "{address_text}"
 
 Rules:
@@ -101,6 +103,9 @@ Examples:
 - "803/27 King Street, Sydney NSW 2000" → "Sydney"
 - "123 Main St, New York, NY 10001" → "New York"
 - "45 Avenue des Champs-Élysées, 75008 Paris, France" → "Paris"
+- "1-1-1 Shibuya, Shibuya City, Tokyo 150-0002, Japan" → "Tokyo"
+- "Unter den Linden 1, 10117 Berlin, Germany" → "Berlin"
+- "Microsoft Corporation, Redmond, WA" → "Redmond"
 
 Address: "{address_text}"
 City:"""
@@ -118,16 +123,22 @@ City:"""
                                 city = content_item.text.strip()
                                 
                                 if city and city != "UNKNOWN" and len(city) <= 50 and not any(char.isdigit() for char in city):
-                                    return city.strip('"\'')
+                                    city = city.strip('"\'')
+                                    print(f"✅ AI extracted city: '{city}' from '{address_text}'")
+                                    return city
+                                else:
+                                    print(f"❌ AI returned invalid city: '{city}' from '{address_text}'")
             
+            print(f"❌ AI could not extract city from: '{address_text}'")
             return None
             
         except Exception as e:
-            print(f"City extraction failed for '{address_text}': {str(e)}")
+            print(f"❌ City extraction failed for '{address_text}': {str(e)}")
             return None
     
     def extract_city_from_google_data(self, person: Dict[str, Any]) -> Optional[str]:
         """Extract city from Google People API data using AI"""
+        print("🔍 Extracting city from Google People API data...")
         priority_fields = ['residences', 'locations', 'addresses']
         
         for field_name in priority_fields:
@@ -136,16 +147,20 @@ City:"""
             if not field_data:
                 continue
                 
+            print(f"📍 Checking {field_name} field with {len(field_data)} items")
+            
             for item in field_data:
                 if isinstance(item, dict):
                     if 'value' in item and isinstance(item['value'], str):
                         address_value = item['value']
+                        print(f"📍 Found address value: '{address_value}'")
                         city = self.extract_city_with_ai(address_value)
                         if city:
                             return city
                     
                     for key, value in item.items():
                         if key != 'value' and isinstance(value, str) and value:
+                            print(f"📍 Found {key}: '{value}'")
                             city = self.extract_city_with_ai(value)
                             if city:
                                 return city
@@ -155,20 +170,25 @@ City:"""
         for field_name in other_fields:
             field_data = person.get(field_name, [])
             if field_data:
+                print(f"📍 Checking {field_name} field with {len(field_data)} items")
                 for item in field_data:
                     if isinstance(item, dict):
                         for key, value in item.items():
                             if isinstance(value, str) and value and len(value) > 5:
                                 if any(word in value.lower() for word in ['street', 'avenue', 'road', 'city', 'town', 'address']):
+                                    print(f"📍 Found potential address in {key}: '{value}'")
                                     city = self.extract_city_with_ai(value)
                                     if city:
                                         return city
         
+        print("❌ No city found in Google People API data")
         return None
     
     def scan_gmail_profile(self, email: str, user_id: str) -> Dict[str, Any]:
         """Scan Gmail for profile information using OAuth"""
         try:
+            print(f"📧 Starting Gmail profile scan for: {email}")
+            
             # Define comprehensive scopes
             scopes = [
                 "openid", 
@@ -194,7 +214,7 @@ City:"""
                 f"&scope={'%20'.join(urllib.parse.quote(s) for s in scopes)}"
             )
             
-            print(f"Please visit this URL to authorize Gmail access: {auth_url}")
+            print(f"🌐 Opening OAuth URL: {auth_url}")
             webbrowser.open(auth_url)
 
             # Wait for callback
@@ -228,6 +248,8 @@ City:"""
                 personFields="names,birthdays,genders,addresses,locations,biographies,interests,organizations,residences"
             ).execute()
 
+            print(f"👤 Retrieved Google People API data: {json.dumps(person, indent=2)[:500]}...")
+
             # Extract profile information
             name = person.get("names", [{}])[0].get("displayName")
             gender = person.get("genders", [{}])[0].get("value")
@@ -237,7 +259,7 @@ City:"""
             # Extract city using AI
             city = self.extract_city_from_google_data(person)
             
-            return {
+            result = {
                 "name": name,
                 "gender": gender,
                 "birthdate": birthdate,
@@ -245,8 +267,11 @@ City:"""
                 "success": True
             }
             
+            print(f"✅ Gmail profile extraction result: {result}")
+            return result
+            
         except Exception as e:
-            print(f"Error scanning Gmail profile: {e}")
+            print(f"❌ Error scanning Gmail profile: {e}")
             return {
                 "name": None,
                 "gender": None,
@@ -268,7 +293,10 @@ City:"""
         }
         
         try:
+            print("🔍 Starting Outlook profile data extraction...")
+            
             # Get basic user profile
+            print("📞 Calling Microsoft Graph /v1.0/me API...")
             user_response = requests.get(
                 "https://graph.microsoft.com/v1.0/me",
                 headers=headers
@@ -276,11 +304,15 @@ City:"""
             
             if user_response.status_code == 200:
                 user_data = user_response.json()
+                print(f"👤 Basic user data: {json.dumps(user_data, indent=2)}")
+                
                 profile_data["name"] = user_data.get("displayName")
+                print(f"📝 Found name: {profile_data['name']}")
                 
                 # Try to get city from office location
                 office_location = user_data.get("officeLocation")
                 if office_location:
+                    print(f"🏢 Found office location: '{office_location}'")
                     city = self.extract_city_with_ai(office_location)
                     if city:
                         profile_data["city"] = city
@@ -288,22 +320,28 @@ City:"""
                 # Check other location fields
                 street_address = user_data.get("streetAddress")
                 if street_address and not profile_data["city"]:
+                    print(f"🏠 Found street address: '{street_address}'")
                     city = self.extract_city_with_ai(street_address)
                     if city:
                         profile_data["city"] = city
                 
                 city_field = user_data.get("city")
                 if city_field and not profile_data["city"]:
+                    print(f"🏙️ Found city field: '{city_field}'")
                     profile_data["city"] = city_field
                     
                 country = user_data.get("country")
                 if country and not profile_data["city"]:
+                    print(f"🌍 Found country: '{country}'")
                     city = self.extract_city_with_ai(country)
                     if city:
                         profile_data["city"] = city
+            else:
+                print(f"❌ Failed to get basic user profile: {user_response.status_code} - {user_response.text}")
 
             # Try extended profile information
             try:
+                print("📞 Calling Microsoft Graph /v1.0/me/profile API...")
                 profile_response = requests.get(
                     "https://graph.microsoft.com/v1.0/me/profile",
                     headers=headers
@@ -311,41 +349,106 @@ City:"""
                 
                 if profile_response.status_code == 200:
                     profile_info = profile_response.json()
+                    print(f"👤 Extended profile data: {json.dumps(profile_info, indent=2)}")
                     
                     if isinstance(profile_info, dict):
                         for date_field in ['birthdate', 'birthday', 'dateOfBirth']:
                             if profile_info.get(date_field) and not profile_data["birthdate"]:
                                 profile_data["birthdate"] = profile_info.get(date_field)
+                                print(f"📅 Found birthdate: {profile_data['birthdate']}")
                         
                         if profile_info.get('gender') and not profile_data["gender"]:
                             profile_data["gender"] = profile_info.get('gender')
+                            print(f"👤 Found gender: {profile_data['gender']}")
                             
                         for location_field in ['location', 'address', 'homeAddress', 'city']:
                             location_data = profile_info.get(location_field)
                             if location_data and not profile_data["city"]:
                                 if isinstance(location_data, str):
+                                    print(f"📍 Found location in {location_field}: '{location_data}'")
                                     city = self.extract_city_with_ai(location_data)
                                     if city:
                                         profile_data["city"] = city
                                 elif isinstance(location_data, dict):
                                     for key, value in location_data.items():
                                         if isinstance(value, str) and value:
+                                            print(f"📍 Found nested location {key}: '{value}'")
                                             city = self.extract_city_with_ai(value)
                                             if city:
                                                 profile_data["city"] = city
                                                 break
-            except Exception:
-                pass
+                else:
+                    print(f"❌ Extended profile API failed: {profile_response.status_code}")
+            except Exception as e:
+                print(f"⚠️ Extended profile API error: {str(e)}")
+
+            # Try Microsoft Graph beta endpoint for more personal data
+            try:
+                print("📞 Calling Microsoft Graph /beta/me API...")
+                beta_response = requests.get(
+                    "https://graph.microsoft.com/beta/me",
+                    headers=headers
+                )
+                
+                if beta_response.status_code == 200:
+                    beta_data = beta_response.json()
+                    print(f"👤 Beta profile data: {json.dumps(beta_data, indent=2)[:500]}...")
+                    
+                    if beta_data.get("birthday") and not profile_data["birthdate"]:
+                        profile_data["birthdate"] = beta_data.get("birthday")
+                        print(f"📅 Found beta birthdate: {profile_data['birthdate']}")
+                    if beta_data.get("gender") and not profile_data["gender"]:
+                        profile_data["gender"] = beta_data.get("gender")
+                        print(f"👤 Found beta gender: {profile_data['gender']}")
+                    if beta_data.get("city") and not profile_data["city"]:
+                        profile_data["city"] = beta_data.get("city")
+                        print(f"🏙️ Found beta city: {profile_data['city']}")
+                else:
+                    print(f"❌ Beta API failed: {beta_response.status_code}")
+            except Exception as e:
+                print(f"⚠️ Beta API error: {str(e)}")
+
+            # Try to get calendar events to extract location information
+            try:
+                print("📞 Calling Microsoft Graph /v1.0/me/events API...")
+                calendar_response = requests.get(
+                    "https://graph.microsoft.com/v1.0/me/events?$top=20&$select=subject,location",
+                    headers=headers
+                )
+                
+                if calendar_response.status_code == 200:
+                    events_data = calendar_response.json()
+                    events = events_data.get("value", [])
+                    print(f"📅 Found {len(events)} calendar events")
+                    
+                    for event in events:
+                        location = event.get("location", {})
+                        if isinstance(location, dict):
+                            display_name = location.get("displayName", "")
+                            if display_name and not profile_data["city"]:
+                                print(f"📍 Found calendar location: '{display_name}'")
+                                city = self.extract_city_with_ai(display_name)
+                                if city:
+                                    profile_data["city"] = city
+                                    break
+                else:
+                    print(f"❌ Calendar API failed: {calendar_response.status_code}")
+            except Exception as e:
+                print(f"⚠️ Calendar API error: {str(e)}")
 
         except Exception as e:
-            print(f"Error extracting Outlook profile: {str(e)}")
+            print(f"❌ Error extracting Outlook profile: {str(e)}")
         
+        print(f"✅ Final Outlook profile data: {profile_data}")
         return profile_data
     
     def scan_outlook_profile(self, email: str, user_id: str) -> Dict[str, Any]:
         """Scan Outlook for profile information using OAuth"""
         try:
+            print(f"📧 Starting Outlook profile scan for: {email}")
+            
             if not config.OUTLOOK_CLIENT_ID:
+                print("❌ OUTLOOK_CLIENT_ID not configured")
                 return {
                     "name": None,
                     "gender": None,
@@ -367,6 +470,8 @@ City:"""
                 "Calendars.Read"
             ]
             
+            print(f"🔐 Starting MSAL interactive authentication...")
+            
             # Interactive authentication
             try:
                 result = app.acquire_token_interactive(
@@ -378,6 +483,7 @@ City:"""
             
             if "access_token" not in result:
                 error_msg = result.get("error_description", result.get("error", "Unknown error"))
+                print(f"❌ Outlook authentication failed: {error_msg}")
                 return {
                     "name": None,
                     "gender": None,
@@ -387,7 +493,9 @@ City:"""
                     "error": f"Outlook authentication failed: {error_msg}"
                 }
 
-            # Store credentials
+            print("✅ Outlook authentication successful")
+
+            # Store credentials for later use
             self.stored_credentials[user_id] = {
                 "email": email,
                 "credentials": result,
@@ -397,16 +505,19 @@ City:"""
             # Extract profile data
             profile_data = self.extract_outlook_profile_data(result['access_token'])
             
-            return {
+            result_data = {
                 "name": profile_data["name"],
                 "gender": profile_data["gender"],
                 "birthdate": profile_data["birthdate"],
                 "city": profile_data["city"],
                 "success": True
             }
+            
+            print(f"✅ Outlook profile extraction result: {result_data}")
+            return result_data
                 
         except Exception as e:
-            print(f"Error scanning Outlook profile: {str(e)}")
+            print(f"❌ Error scanning Outlook profile: {str(e)}")
             return {
                 "name": None,
                 "gender": None,
@@ -418,6 +529,8 @@ City:"""
     
     def scan_email_for_profile(self, email: str, user_id: str) -> Dict[str, Any]:
         """Main method to scan email for profile information"""
+        print(f"📧 Starting email profile scan for: {email}")
+        
         if email.lower().endswith("@gmail.com"):
             return self.scan_gmail_profile(email, user_id)
         else:
