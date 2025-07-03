@@ -161,6 +161,10 @@ def search_flights_tool(origin: str, destination: str, departure_date: str,
         if not agent:
             return {"success": False, "error": "Flight agent not available"}
         
+        # FIXED: Check if context is properly set
+        if not hasattr(agent, 'current_user_id') or not agent.current_user_id:
+            return {"success": False, "error": "User context not available"}
+        
         print(f"🔍 Search flights tool called with: {origin} → {destination} on {departure_date}")
         
         # Convert city names to airport codes if needed
@@ -426,6 +430,11 @@ class FlightAgent:
         self.db = DatabaseOperations()
         self.profile_agent = UserProfileAgent()
         
+        # FIXED: Initialize context variables
+        self.current_user_id = None
+        self.current_session_id = None
+        self.user_profile = None
+        
         # Store this instance globally for tool access
         _current_flight_agent = self
         
@@ -451,10 +460,18 @@ class FlightAgent:
         try:
             print(f"✈️ FlightAgent processing message: '{message[:50]}...'")
             
-            # Store context for tool calls
+            # FIXED: Store context for tool calls on the current instance
             self.current_user_id = user_id
             self.current_session_id = session_id
             self.user_profile = user_profile
+            
+            # FIXED: Also update the global instance to ensure tools have access
+            global _current_flight_agent
+            _current_flight_agent.current_user_id = user_id
+            _current_flight_agent.current_session_id = session_id
+            _current_flight_agent.user_profile = user_profile
+            
+            print(f"🔧 Context set: user_id={user_id}, session_id={session_id}")
             
             # Build conversation context
             context_messages = []
