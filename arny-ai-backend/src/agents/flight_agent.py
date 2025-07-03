@@ -491,6 +491,10 @@ class FlightAgent:
             _current_flight_agent.current_user_id = user_id
             _current_flight_agent.current_session_id = session_id
             _current_flight_agent.user_profile = user_profile
+            # FIXED: Clear global instance results as well
+            _current_flight_agent.latest_search_results = []
+            _current_flight_agent.latest_search_id = None
+            _current_flight_agent.latest_filtering_info = {}
             
             print(f"🔧 Context set: user_id={user_id}, session_id={session_id}")
             
@@ -521,14 +525,22 @@ class FlightAgent:
             
             print(f"✅ FlightAgent response generated: '{assistant_message[:50]}...'")
             
-            # FIXED: Include search results and search ID in response
+            # FIXED: Read search results from the global instance that tools updated
+            global_agent = _get_flight_agent()
+            search_results = global_agent.latest_search_results if global_agent else []
+            search_id = global_agent.latest_search_id if global_agent else None
+            filtering_info = global_agent.latest_filtering_info if global_agent else {}
+            
+            print(f"📊 Retrieved search data: {len(search_results)} results, search_id: {search_id}")
+            
+            # FIXED: Include search results and search ID in response from global instance
             return {
                 "message": assistant_message,
                 "agent_type": "flight",
                 "requires_action": False,  # Will be set to True if flight selection is needed
-                "search_results": self.latest_search_results,
-                "search_id": self.latest_search_id,
-                "filtering_info": self.latest_filtering_info,
+                "search_results": search_results,
+                "search_id": search_id,
+                "filtering_info": filtering_info,
                 "metadata": {
                     "agent_type": "flight",
                     "conversation_type": "flight_search"
