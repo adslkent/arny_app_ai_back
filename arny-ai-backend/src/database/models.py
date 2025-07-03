@@ -20,7 +20,7 @@ All models use Pydantic for validation and include proper type hints.
 """
 
 from typing import Optional, Dict, Any, List, Union
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from enum import Enum
 import uuid
@@ -361,13 +361,14 @@ class ChatMessage(BaseModelWithId):
 
 # ==================== SEARCH MODELS ====================
 
-class FlightSearch(BaseModelWithId):
+class FlightSearch(BaseModel):  # FIXED: Remove BaseModelWithId inheritance
     """
     Flight search result model
     
     Stores flight search parameters and results.
     Maps to the 'flight_searches' table in Supabase.
     """
+    search_id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Flight search UUID")  # FIXED: Added search_id field
     user_id: str = Field(..., description="Supabase user UUID")
     session_id: Optional[str] = Field(None, description="Chat session UUID")
     
