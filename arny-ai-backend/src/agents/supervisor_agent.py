@@ -1,6 +1,5 @@
 from typing import Dict, Any, Optional
-from agents import Agent, Runner
-from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
+from openai import OpenAI
 
 from ..utils.config import config
 from .flight_agent import FlightAgent
@@ -8,50 +7,20 @@ from .hotel_agent import HotelAgent
 
 class SupervisorAgent:
     """
-    Supervisor agent that coordinates sub-agents and handles general queries using OpenAI Agents SDK
+    Supervisor agent that coordinates sub-agents and handles general queries
     """
     
     def __init__(self):
+        self.openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
+        
         # Initialize the specialized agents
-        self.flight_agent_instance = FlightAgent()
-        self.hotel_agent_instance = HotelAgent()
-        
-        # Create SDK agents for handoffs
-        self.flight_sdk_agent = Agent(
-            name="Flight Assistant",
-            handoff_description="Specialist agent for flight searches and bookings",
-            instructions="You are Arny's flight search specialist. You help users find and book flights.",
-            model="o4-mini"
-        )
-        
-        self.hotel_sdk_agent = Agent(
-            name="Hotel Assistant", 
-            handoff_description="Specialist agent for hotel searches and bookings",
-            instructions="You are Arny's hotel booking specialist. You help users find and book hotels.",
-            model="o4-mini"
-        )
-        
-        # Create the main supervisor agent with handoffs
-        self.agent = Agent(
-            name="Arny Travel Assistant",
-            instructions=prompt_with_handoff_instructions(
-                "You are Arny, a helpful AI travel assistant with expertise in travel planning. "
-                "You can help with general questions and coordinate with specialized agents when needed.\n\n"
-                "For specific requests:\n"
-                "- If the user asks to search for flights, handoff to the Flight Assistant\n"
-                "- If the user asks to search for hotels, handoff to the Hotel Assistant\n"
-                "- For general travel advice, recommendations, or other questions, provide helpful responses directly\n\n"
-                "Always be friendly, professional, and helpful. Understand the user's travel needs and "
-                "provide appropriate guidance or delegate to the right specialist agent."
-            ),
-            model="o4-mini",
-            handoffs=[self.flight_sdk_agent, self.hotel_sdk_agent]
-        )
+        self.flight_agent = FlightAgent()
+        self.hotel_agent = HotelAgent()
     
     async def process_message(self, user_id: str, message: str, session_id: str,
                             user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
         """
-        Process user message using OpenAI Agents SDK with handoffs
+        Process user message with intelligent routing to specialized agents
         
         Args:
             user_id: User identifier
@@ -65,56 +34,34 @@ class SupervisorAgent:
         """
         
         try:
-            # Store context for potential handoff processing
-            self.current_user_id = user_id
-            self.current_session_id = session_id
-            self.current_user_profile = user_profile
+            print(f"🤖 Supervisor processing message: '{message[:50]}...'")
             
-            # Build conversation context
-            context_messages = []
+            # Analyze the message to determine routing
+            routing_decision = await self._analyze_message_for_routing(message)
             
-            # Add recent conversation history (last 10 messages)
-            for msg in conversation_history[-10:]:
-                context_messages.append({
-                    "role": msg.message_type,
-                    "content": msg.content
-                })
+            print(f"🎯 Routing decision: {routing_decision}")
             
-            # Process with agent - the SDK will handle handoffs automatically
-            if not context_messages:
-                # First message in conversation
-                result = await Runner.run(self.agent, message)
-            else:
-                # Continue conversation with context
-                result = await Runner.run(self.agent, context_messages + [{"role": "user", "content": message}])
-            
-            # Check if a handoff occurred by examining the active agent
-            final_agent_name = getattr(result, 'agent', self.agent).name if hasattr(result, 'agent') else self.agent.name
-            
-            # If handoff occurred to specialized agent, delegate to the actual implementation
-            if final_agent_name == "Flight Assistant":
-                return await self.flight_agent_instance.process_message(
+            # Route to appropriate agent based on analysis
+            if routing_decision == "flight_search":
+                print("✈️ Routing to FlightAgent")
+                return await self.flight_agent.process_message(
                     user_id, message, session_id, user_profile, conversation_history
                 )
-            elif final_agent_name == "Hotel Assistant":
-                return await self.hotel_agent_instance.process_message(
+            elif routing_decision == "hotel_search":
+                print("🏨 Routing to HotelAgent")
+                return await self.hotel_agent.process_message(
                     user_id, message, session_id, user_profile, conversation_history
                 )
             else:
-                # Supervisor handled the request directly
-                return {
-                    "message": result.final_output,
-                    "agent_type": "supervisor",
-                    "requires_action": False,
-                    "metadata": {
-                        "agent_type": "supervisor",
-                        "conversation_type": "general",
-                        "user_profile_used": bool(user_profile.get("name") or user_profile.get("city"))
-                    }
-                }
+                print("💬 Handling as general conversation")
+                return await self._handle_general_conversation(
+                    user_id, message, session_id, user_profile, conversation_history
+                )
         
         except Exception as e:
-            print(f"Error in supervisor agent: {e}")
+            print(f"❌ Error in supervisor agent: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 "message": "I'm sorry, I encountered an error processing your request. Please try again.",
                 "agent_type": "supervisor",
@@ -122,11 +69,223 @@ class SupervisorAgent:
                 "error": str(e)
             }
     
+    async def _analyze_message_for_routing(self, message: str) -> str:
+        """
+        Analyze user message to determine which agent should handle it
+        
+        Args:
+            message: User's message
+            
+        Returns:
+            str: "flight_search", "hotel_search", or "general"
+        """
+        
+        try:
+            print(f"🔍 Analyzing message for routing: '{message}'")
+            
+            # Use OpenAI to analyze the message intent
+            prompt = f"""Analyze this user message and determine what type of request it is.
+
+User message: "{message}"
+
+Determine if this is:
+1. A flight search request (user wants to find, search, or book flights)
+2. A hotel search request (user wants to find, search, or book hotels/accommodation)
+3. A general travel question or conversation
+
+Respond with exactly one of these three words:
+- "flight_search" if it's about flights
+- "hotel_search" if it's about hotels/accommodation
+- "general" if it's general travel conversation
+
+Look for keywords like:
+- Flight search: flight, flights, fly, plane, airline, departure, arrival, ticket
+- Hotel search: hotel, hotels, accommodation, stay, room, check-in, check-out, booking
+
+Message: "{message}"
+Classification:"""
+
+            response = self.openai_client.responses.create(
+                model="o4-mini",
+                input=prompt
+            )
+            
+            # Extract response
+            classification = "general"  # Default
+            if response and hasattr(response, 'output') and response.output:
+                for output_item in response.output:
+                    if hasattr(output_item, 'content') and output_item.content:
+                        for content_item in output_item.content:
+                            if hasattr(content_item, 'text') and content_item.text:
+                                classification = content_item.text.strip().lower()
+                                break
+            
+            # Validate classification
+            valid_classifications = ["flight_search", "hotel_search", "general"]
+            if classification not in valid_classifications:
+                print(f"⚠️ Invalid classification '{classification}', defaulting to 'general'")
+                classification = "general"
+            
+            print(f"✅ Message classified as: '{classification}'")
+            return classification
+            
+        except Exception as e:
+            print(f"❌ Error in message analysis: {e}")
+            # Fallback to keyword-based routing
+            return self._fallback_keyword_routing(message)
+    
+    def _fallback_keyword_routing(self, message: str) -> str:
+        """
+        Fallback keyword-based routing if LLM analysis fails
+        
+        Args:
+            message: User's message
+            
+        Returns:
+            str: "flight_search", "hotel_search", or "general"
+        """
+        
+        message_lower = message.lower()
+        
+        # Flight keywords
+        flight_keywords = [
+            'flight', 'flights', 'fly', 'plane', 'airline', 'airport', 
+            'departure', 'arrival', 'ticket', 'book flight', 'find flight'
+        ]
+        
+        # Hotel keywords  
+        hotel_keywords = [
+            'hotel', 'hotels', 'accommodation', 'stay', 'room', 'rooms',
+            'check-in', 'check-out', 'booking', 'book hotel', 'find hotel'
+        ]
+        
+        # Check for flight keywords
+        if any(keyword in message_lower for keyword in flight_keywords):
+            print(f"🔄 Fallback: Detected flight keywords")
+            return "flight_search"
+        
+        # Check for hotel keywords
+        elif any(keyword in message_lower for keyword in hotel_keywords):
+            print(f"🔄 Fallback: Detected hotel keywords")
+            return "hotel_search"
+        
+        else:
+            print(f"🔄 Fallback: No specific keywords detected, treating as general")
+            return "general"
+    
+    async def _handle_general_conversation(self, user_id: str, message: str, session_id: str,
+                                         user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
+        """
+        Handle general travel conversation that doesn't require specialized agents
+        
+        Args:
+            user_id: User identifier
+            message: User's message
+            session_id: Session identifier
+            user_profile: User's profile information
+            conversation_history: Previous conversation history
+            
+        Returns:
+            Dict containing response
+        """
+        
+        try:
+            print(f"💬 Handling general conversation")
+            
+            # Build context from user profile
+            user_context = ""
+            if user_profile.get("name"):
+                user_context += f"User's name: {user_profile['name']}\n"
+            if user_profile.get("city"):
+                user_context += f"User's city: {user_profile['city']}\n"
+            
+            # Build conversation context
+            context_messages = []
+            
+            # Add recent conversation history (last 5 messages)
+            for msg in conversation_history[-5:]:
+                context_messages.append({
+                    "role": msg.message_type,
+                    "content": msg.content
+                })
+            
+            # Create prompt for general travel assistance
+            system_prompt = f"""You are Arny, a helpful AI travel assistant. You provide general travel advice, recommendations, and friendly conversation.
+
+{user_context}
+
+You can help with:
+- General travel advice and tips
+- Travel destination recommendations  
+- Travel planning guidance
+- Answering travel-related questions
+- Friendly conversation about travel
+
+For specific flight searches or hotel searches, let the user know they can ask you to search for flights or hotels and you'll help them with that.
+
+Always be friendly, helpful, and professional. Keep responses conversational and not too long."""
+
+            # Build messages for OpenAI
+            messages = [{"role": "system", "content": system_prompt}]
+            
+            # Add conversation history
+            messages.extend(context_messages)
+            
+            # Add current message
+            messages.append({"role": "user", "content": message})
+            
+            # Get response from OpenAI
+            response = self.openai_client.responses.create(
+                model="o4-mini",
+                input=f"""Context: {system_prompt}
+
+Conversation history: {context_messages}
+
+User message: {message}
+
+Respond as Arny, the travel assistant:"""
+            )
+            
+            # Extract response
+            assistant_message = "I'm here to help with your travel planning! Feel free to ask me about flights, hotels, or any travel advice you need."
+            
+            if response and hasattr(response, 'output') and response.output:
+                for output_item in response.output:
+                    if hasattr(output_item, 'content') and output_item.content:
+                        for content_item in output_item.content:
+                            if hasattr(content_item, 'text') and content_item.text:
+                                assistant_message = content_item.text.strip()
+                                break
+            
+            print(f"✅ Generated general response: '{assistant_message[:50]}...'")
+            
+            return {
+                "message": assistant_message,
+                "agent_type": "supervisor",
+                "requires_action": False,
+                "metadata": {
+                    "agent_type": "supervisor",
+                    "conversation_type": "general",
+                    "user_profile_used": bool(user_profile.get("name") or user_profile.get("city"))
+                }
+            }
+            
+        except Exception as e:
+            print(f"❌ Error in general conversation: {e}")
+            return {
+                "message": "I'm here to help with your travel planning! You can ask me to search for flights, find hotels, or get travel advice.",
+                "agent_type": "supervisor",
+                "requires_action": False,
+                "metadata": {
+                    "agent_type": "supervisor",
+                    "conversation_type": "general",
+                    "error": str(e)
+                }
+            }
+    
     async def handle_general_conversation(self, user_id: str, message: str, session_id: str,
                                         user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
         """
-        Handle general conversation using the SDK agent (legacy method for backwards compatibility)
-        
-        This method now delegates to process_message since the SDK handles routing automatically.
+        Legacy method for backwards compatibility - delegates to process_message
         """
         return await self.process_message(user_id, message, session_id, user_profile, conversation_history)
