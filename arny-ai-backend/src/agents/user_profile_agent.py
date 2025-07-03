@@ -108,7 +108,7 @@ class UserProfileAgent:
     async def filter_hotel_results(self, user_id: str, hotel_results: List[Dict[str, Any]], 
                                  search_params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Filter hotel search results based on group preferences
+        Filter hotel search results based on group preferences - ENHANCED WITH DEBUG LOGGING
         
         Args:
             user_id: ID of user who initiated the search
@@ -121,10 +121,26 @@ class UserProfileAgent:
         try:
             logger.info(f"Filtering hotel results for user {user_id}")
             
+            # DEBUG: Log all original results
+            print(f"🔍 DEBUG: Original {len(hotel_results)} hotel results BEFORE filtering:")
+            for i, hotel_data in enumerate(hotel_results, 1):
+                hotel = hotel_data.get("hotel", {})
+                offers = hotel_data.get("offers", [])
+                best_offer = offers[0] if offers else {}
+                price = best_offer.get("price", {})
+                
+                print(f"   Hotel {i}: {hotel.get('name', 'Unknown')}")
+                print(f"   - Chain: {hotel.get('chainCode', 'N/A')}")
+                print(f"   - Rating: {hotel.get('rating', 'N/A')}")
+                print(f"   - Price: {price.get('currency', '')} {price.get('total', 'N/A')}")
+                print(f"   - Room: {best_offer.get('room', {}).get('description', {}).get('text', 'N/A')}")
+                print()
+
             # Get group member profiles
             group_profiles = await self._get_group_profiles(user_id)
             
             if not group_profiles:
+                print(f"🔍 DEBUG: No group filtering applied - single user or no group found")
                 # No group or single user - return original results
                 return {
                     "filtered_results": hotel_results,
@@ -137,20 +153,54 @@ class UserProfileAgent:
             # Create group analysis prompt
             group_summary = self._create_group_summary(group_profiles)
             
+            print(f"🔍 DEBUG: Group filtering applied for {len(group_profiles)} group members:")
+            print(f"   - Group size: {len(group_profiles)}")
+            print(f"   - Budget ranges: {group_summary.get('budget_ranges', [])}")
+            print(f"   - Travel styles: {group_summary.get('travel_styles', [])}")
+            print(f"   - Preferred hotels: {group_summary.get('preferred_hotels', [])}")
+            print(f"   - Dietary restrictions: {group_summary.get('dietary_restrictions', [])}")
+            print(f"   - Accessibility needs: {group_summary.get('accessibility_needs', [])}")
+
             # Filter hotels using AI
             filtered_results = await self._ai_filter_hotels(
                 hotel_results, group_summary, search_params
             )
             
+            # DEBUG: Log filtering results
+            recommended_hotels = filtered_results.get("recommended_hotels", hotel_results)
+            excluded_count = len(hotel_results) - len(recommended_hotels)
+            
+            print(f"🔍 DEBUG: Filtering results:")
+            print(f"   - Original count: {len(hotel_results)}")
+            print(f"   - Filtered count: {len(recommended_hotels)}")
+            print(f"   - Excluded count: {excluded_count}")
+            print(f"   - Filtering rationale: {filtered_results.get('filtering_rationale', 'N/A')}")
+            
+            if excluded_count > 0:
+                print(f"🔍 DEBUG: Hotels that were EXCLUDED by filtering:")
+                excluded_hotels = []
+                recommended_names = [h.get('hotel', {}).get('name', '') for h in recommended_hotels]
+                
+                for i, hotel_data in enumerate(hotel_results, 1):
+                    hotel_name = hotel_data.get("hotel", {}).get("name", "")
+                    if hotel_name not in recommended_names:
+                        excluded_hotels.append((i, hotel_name, hotel_data))
+                        print(f"   ❌ Hotel {i}: {hotel_name}")
+                
+                print(f"🔍 DEBUG: Recommended hotels that PASSED filtering:")
+                for i, hotel_data in enumerate(recommended_hotels, 1):
+                    hotel_name = hotel_data.get("hotel", {}).get("name", "")
+                    print(f"   ✅ Hotel {i}: {hotel_name}")
+
             return {
-                "filtered_results": filtered_results.get("recommended_hotels", hotel_results),
+                "filtered_results": recommended_hotels,
                 "original_count": len(hotel_results),
-                "filtered_count": len(filtered_results.get("recommended_hotels", hotel_results)),
+                "filtered_count": len(recommended_hotels),
                 "filtering_applied": True,
                 "rationale": filtered_results.get("filtering_rationale", "AI filtering applied"),
                 "group_size": len(group_profiles),
                 "group_preferences": filtered_results.get("group_considerations", {}),
-                "excluded_count": filtered_results.get("excluded_count", 0)
+                "excluded_count": excluded_count
             }
             
         except Exception as e:
