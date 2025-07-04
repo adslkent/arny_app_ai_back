@@ -3,9 +3,9 @@ import os
 from typing import Dict, Any
 
 # Import handlers
-from handlers.main_handler import MainHandler
-from handlers.onboarding_handler import OnboardingHandler
-from utils.config import config
+from .handlers.main_handler import MainHandler
+from .handlers.onboarding_handler import OnboardingHandler
+from .utils.config import config
 
 # Initialize handlers
 main_handler = MainHandler()
