@@ -185,7 +185,7 @@ class MainHandler:
     
     async def handle_auth_request(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
-        Handle authentication requests (sign up, sign in, etc.)
+        Handle authentication requests (sign up, sign in, etc.) - FIXED VERSION
         
         Args:
             event: Lambda event containing auth request
@@ -210,16 +210,33 @@ class MainHandler:
                 auth_result = await self.auth.sign_up(email, password, metadata)
                 
                 if auth_result.get("success"):
-                    # Create initial user profile
-                    from ..database.models import UserProfile
-                    
-                    user_profile = UserProfile(
-                        user_id=auth_result["user"]["id"],
-                        email=email,
-                        onboarding_completed=False
-                    )
-                    
-                    await self.db.create_user_profile(user_profile)
+                    # FIXED: Handle user profile creation more gracefully
+                    try:
+                        # Check if user profile already exists
+                        existing_profile = await self.db.get_user_profile(auth_result["user"]["id"])
+                        
+                        if not existing_profile:
+                            # Create initial user profile only if it doesn't exist
+                            from ..database.models import UserProfile
+                            
+                            user_profile = UserProfile(
+                                user_id=auth_result["user"]["id"],
+                                email=email,
+                                onboarding_completed=False
+                            )
+                            
+                            profile_created = await self.db.create_user_profile(user_profile)
+                            if profile_created:
+                                print(f"✅ User profile created for: {email}")
+                            else:
+                                print(f"⚠️ User profile creation failed for: {email}")
+                        else:
+                            print(f"ℹ️ User profile already exists for: {email}")
+                            
+                    except Exception as profile_error:
+                        # FIXED: Don't fail signup if profile creation fails
+                        print(f"⚠️ User profile creation error (non-critical): {profile_error}")
+                        # Continue with successful auth response even if profile creation fails
                     
                     # Convert datetime objects to strings for JSON serialization
                     user_data = auth_result["user"].copy()
