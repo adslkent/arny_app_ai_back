@@ -41,7 +41,7 @@ plugins:
 
 custom:
   pythonRequirements:
-    dockerizePip: false
+    dockerizePip: true
     layer: true
 
 functions:
