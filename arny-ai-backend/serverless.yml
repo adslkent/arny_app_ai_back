@@ -7,7 +7,7 @@ provider:
   runtime: python3.11
   region: us-east-1
   stage: ${opt:stage, 'dev'}
-  timeout: 30  # Increased to API Gateway maximum (30 seconds)
+  timeout: 29  # Match API Gateway's 29-second timeout limit
   memorySize: 1024  # Increased memory for better performance (faster CPU + network)
   
   environment:
@@ -75,7 +75,7 @@ functions:
   # Onboarding functions - may need more time for email scanning and AI processing
   onboarding:
     handler: src/main.lambda_handler
-    timeout: 30  # Maximum for potential email scanning + AI processing
+    timeout: 29  # Match API Gateway's 29-second timeout limit
     memorySize: 1024  # More memory for AI operations
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
@@ -100,9 +100,8 @@ functions:
   # Main travel chat functions - need maximum time for AI processing and API calls
   travel:
     handler: src/main.lambda_handler
-    timeout: 30  # Maximum for flight/hotel search + AI filtering
+    timeout: 29  # Match API Gateway's 29-second timeout limit
     memorySize: 1024  # More memory for AI processing and API calls
-    reservedConcurrency: 3  # Reserve capacity to reduce cold starts for main functionality
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
     events:
