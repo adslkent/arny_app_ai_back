@@ -50,7 +50,7 @@ def _run_in_new_loop(coro):
 @function_tool
 def scan_email_for_profile_tool(email: str) -> dict:
     """
-    Scan email for profile information using OAuth
+    Scan email for profile information using environment-appropriate method
     Returns a dict with keys: name, gender, birthdate, city
     """
     try:
@@ -67,6 +67,19 @@ def scan_email_for_profile_tool(email: str) -> dict:
         profile_data = agent.email_service.scan_email_for_profile(email, agent.current_user_id)
         
         print(f"📊 Profile scan results: {profile_data}")
+        
+        # Handle email scanning failure gracefully
+        if not profile_data.get("success"):
+            print(f"📧 Email scanning failed: {profile_data.get('error', 'Unknown error')}")
+            return {
+                "name": None,
+                "gender": None,
+                "birthdate": None,
+                "city": None,
+                "success": False,
+                "error": profile_data.get('error', 'Email scanning not available'),
+                "message": "I couldn't scan your email automatically. Let me ask for your information manually instead."
+            }
         
         # Store any found profile data in collected data
         if profile_data.get("success"):
@@ -96,7 +109,8 @@ def scan_email_for_profile_tool(email: str) -> dict:
             "birthdate": None,
             "city": None,
             "success": False,
-            "error": str(e)
+            "error": str(e),
+            "message": "I encountered an error scanning your email. Let me ask for your information manually instead."
         }
 
 @function_tool
@@ -320,6 +334,10 @@ def send_group_invites_tool(email_addresses: str) -> dict:
             # Mark invites as sent
             agent.current_collected_data["group_invites_sent"] = True
             agent.current_collected_data["invited_emails"] = result.get("sent_to", [])
+        else:
+            # Handle email sending limitation in Lambda
+            agent.current_collected_data["group_invites_sent"] = True
+            agent.current_collected_data["group_code_shared"] = group_code
         
         return result
         
@@ -481,7 +499,7 @@ def skip_group_setup_tool() -> dict:
 
 class OnboardingAgent:
     """
-    Enhanced LLM-driven onboarding agent with email scanning capabilities
+    Enhanced LLM-driven onboarding agent with improved email scanning capabilities
     """
     
     def __init__(self):
@@ -511,7 +529,10 @@ class OnboardingAgent:
                 "   - IMPORTANT: When a user skips group setup, NEVER mention any specific group code to them. Just say that group setup has been skipped and they can invite people later.\n\n"
                 "2. EMAIL SCANNING:\n"
                 "   Ask about the user's Gmail or Outlook address, then use scan_email_for_profile_tool "
-                "to fetch name, gender, birthdate, and city. If you successfully extract ANY information (even partial), "
+                "to fetch name, gender, birthdate, and city. IMPORTANT: If email scanning fails or returns an error, "
+                "gracefully proceed to manual data collection without making the user feel like something went wrong. "
+                "For example, if scanning fails, say: 'I'll help you fill out your profile manually instead.' "
+                "If you successfully extract ANY information (even partial), "
                 "present what was found and ask the user to confirm or provide the missing details. "
                 "For example: 'I found your name is John Smith, but I couldn't find your gender, birthdate, or city. "
                 "Could you please provide these missing details?' Only if NO information is extracted at all should you "
@@ -533,14 +554,16 @@ class OnboardingAgent:
                 "   - If the user skipped group setup (group_role = 'admin'), ask: 'Would you like to setup a group with people you know? This can always be done later.' "
                 "If the user says yes, respond with 'Please invite users to your new group by providing their email addresses.' "
                 "When they provide email addresses, respond with 'To confirm, I will be sending invites to {list all provided email addresses}. Are they correct?' "
-                "If they confirm yes, use send_group_invites_tool to send the invitation emails.\n\n"
+                "If they confirm yes, use send_group_invites_tool to send the invitation emails. "
+                "If email sending fails in the current environment, gracefully explain that the group code can be shared manually.\n\n"
                 "Finally, ONLY when all the above onboarding process is completed, respond: "
                 "'Thank you, this completes your onboarding to Arny!'\n\n"
                 "Always be friendly, conversational, and helpful. Keep track of what information you've already collected to avoid asking the same questions twice. "
                 "DO NOT call the same tool multiple times in one response. "
                 "CONTINUE FROM WHERE THE CONVERSATION LEFT OFF - check collected data to see what step to proceed with. "
                 "NEVER reveal specific group codes to users when they skip group setup. "
-                "ALWAYS use the appropriate store_*_tool when users provide information to ensure it gets saved."
+                "ALWAYS use the appropriate store_*_tool when users provide information to ensure it gets saved. "
+                "Handle email scanning failures gracefully without making the user feel like something is broken."
             ),
             model="o4-mini",
             tools=[
@@ -558,7 +581,7 @@ class OnboardingAgent:
     async def process_message(self, user_id: str, message: str, session_id: str, 
                             current_progress: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process message using OpenAI Agents SDK with enhanced email capabilities
+        Process message using OpenAI Agents SDK with enhanced email capabilities and better error handling
         """
         
         try:
