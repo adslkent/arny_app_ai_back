@@ -7,8 +7,8 @@ provider:
   runtime: python3.11
   region: us-east-1
   stage: ${opt:stage, 'dev'}
-  timeout: 29
-  memorySize: 512
+  timeout: 30  # Increased to API Gateway maximum (30 seconds)
+  memorySize: 1024  # Increased memory for better performance (faster CPU + network)
   
   environment:
     STAGE: ${self:provider.stage}
@@ -43,11 +43,15 @@ custom:
   pythonRequirements:
     dockerizePip: true
     layer: true
+    slim: true  # Reduce package size for faster cold starts
+    strip: false
 
 functions:
-  # Authentication functions
+  # Authentication functions - keep shorter timeout since auth operations are quick
   auth:
     handler: src/main.lambda_handler
+    timeout: 15  # Auth operations are typically fast
+    memorySize: 512  # Less memory needed for auth
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
     events:
@@ -68,9 +72,11 @@ functions:
           method: post
           cors: true
 
-  # Onboarding functions
+  # Onboarding functions - may need more time for email scanning and AI processing
   onboarding:
     handler: src/main.lambda_handler
+    timeout: 30  # Maximum for potential email scanning + AI processing
+    memorySize: 1024  # More memory for AI operations
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
     events:
@@ -91,9 +97,12 @@ functions:
           method: post
           cors: true
 
-  # Main travel chat functions
+  # Main travel chat functions - need maximum time for AI processing and API calls
   travel:
     handler: src/main.lambda_handler
+    timeout: 30  # Maximum for flight/hotel search + AI filtering
+    memorySize: 1024  # More memory for AI processing and API calls
+    reservedConcurrency: 3  # Reserve capacity to reduce cold starts for main functionality
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
     events:
@@ -106,9 +115,11 @@ functions:
           method: post
           cors: true
 
-  # User management functions
+  # User management functions - quick operations
   user:
     handler: src/main.lambda_handler
+    timeout: 10  # User status checks are fast
+    memorySize: 512  # Less memory needed
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
     events:
@@ -121,9 +132,11 @@ functions:
           method: get
           cors: true
 
-  # Health check function
+  # Health check function - very quick
   health:
     handler: src/main.lambda_handler
+    timeout: 10  # Health checks should be fast
+    memorySize: 256  # Minimal memory needed
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
     events:
@@ -145,7 +158,7 @@ resources:
           Types:
             - REGIONAL
 
-    # CloudWatch Log Groups
+    # CloudWatch Log Groups with optimized retention
     AuthLogGroup:
       Type: AWS::Logs::LogGroup
       Properties:
