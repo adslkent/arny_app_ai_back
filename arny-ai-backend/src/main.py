@@ -1,5 +1,6 @@
 import json
 import os
+import asyncio
 from typing import Dict, Any
 
 # Import handlers
@@ -11,9 +12,27 @@ from .utils.config import config
 main_handler = MainHandler()
 onboarding_handler = OnboardingHandler()
 
-async def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     Main AWS Lambda handler - routes requests to appropriate handlers
+    
+    FIXED: This is now synchronous as required by AWS Lambda runtime.
+    All async operations are handled via asyncio.run()
+    
+    Args:
+        event: Lambda event containing request data
+        context: Lambda context
+        
+    Returns:
+        Response dictionary
+    """
+    
+    # Run the async handler using asyncio.run()
+    return asyncio.run(_async_lambda_handler(event, context))
+
+async def _async_lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """
+    Internal async handler that contains all the original logic
     
     Args:
         event: Lambda event containing request data
@@ -31,6 +50,8 @@ async def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         path = event.get('path', '')
         http_method = event.get('httpMethod', 'POST')
         
+        print(f"🔍 Processing request: {http_method} {path}")
+        
         # Handle CORS preflight requests
         if http_method == 'OPTIONS':
             return _cors_response()
@@ -44,14 +65,19 @@ async def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return await _handle_main_routes(event, context)
         elif path.startswith('/user'):
             return await _handle_user_routes(event, context)
+        elif path == '/health':
+            return await _handle_health_route(event, context)
         else:
             return _error_response(404, f"Route not found: {path}")
             
     except ValueError as e:
         # Configuration error
+        print(f"❌ Configuration error: {str(e)}")
         return _error_response(500, f"Configuration error: {str(e)}")
     except Exception as e:
-        print(f"Unexpected error in lambda_handler: {str(e)}")
+        print(f"❌ Unexpected error in lambda_handler: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return _error_response(500, "Internal server error")
 
 async def _handle_auth_routes(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -100,6 +126,32 @@ async def _handle_user_routes(event: Dict[str, Any], context: Any) -> Dict[str, 
     else:
         return _error_response(404, f"User route not found: {path}")
 
+async def _handle_health_route(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """Handle health check route"""
+    
+    try:
+        # Basic health check
+        from .database.operations import DatabaseOperations
+        db = DatabaseOperations()
+        health_status = await db.health_check()
+        
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            },
+            'body': json.dumps({
+                'status': 'healthy',
+                'service': 'arny-ai-backend',
+                'database': health_status,
+                'version': '1.0.0'
+            })
+        }
+        
+    except Exception as e:
+        return _error_response(500, f"Health check failed: {str(e)}")
+
 def _cors_response() -> Dict[str, Any]:
     """Return CORS preflight response"""
     return {
@@ -132,12 +184,9 @@ if __name__ == "__main__":
     
     # Example test event
     test_event = {
-        'path': '/user/status',
-        'httpMethod': 'POST',
-        'body': json.dumps({
-            'user_id': 'test_user',
-            'access_token': 'test_token'
-        })
+        'path': '/health',
+        'httpMethod': 'GET',
+        'body': None
     }
     
     class MockContext:
@@ -148,9 +197,6 @@ if __name__ == "__main__":
             self.memory_limit_in_mb = "128"
             self.remaining_time_in_millis = lambda: 30000
     
-    async def test():
-        context = MockContext()
-        response = await lambda_handler(test_event, context)
-        print(json.dumps(response, indent=2))
-    
-    # asyncio.run(test())
+    context = MockContext()
+    response = lambda_handler(test_event, context)
+    print(json.dumps(response, indent=2))
