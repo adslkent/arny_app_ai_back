@@ -555,7 +555,7 @@ class OnboardingAgent:
                 "If the user says yes, respond with 'Please invite users to your new group by providing their email addresses.' "
                 "When they provide email addresses, respond with 'To confirm, I will be sending invites to {list all provided email addresses}. Are they correct?' "
                 "If they confirm yes, use send_group_invites_tool to send the invitation emails. "
-                "If email sending fails in the current environment, gracefully explain that the group code can be shared manually.\n\n"
+                "If email sending fails, gracefully explain that the group code can be shared manually.\n\n"
                 "Finally, ONLY when all the above onboarding process is completed, respond: "
                 "'Thank you, this completes your onboarding to Arny!'\n\n"
                 "Always be friendly, conversational, and helpful. Keep track of what information you've already collected to avoid asking the same questions twice. "
