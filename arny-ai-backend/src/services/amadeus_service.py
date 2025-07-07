@@ -210,12 +210,12 @@ class AmadeusService:
             self.logger.error(f"Error formatting flight offer: {e}")
             return offer  # Return original if formatting fails
     
-    # ==================== HOTEL OPERATIONS ====================
+    # ==================== HOTEL OPERATIONS - FIXED ====================
     
     async def search_hotels(self, city_code: str, check_in_date: str, check_out_date: str,
                           adults: int = 1, rooms: int = 1, max_results: int = 20) -> Dict[str, Any]:
         """
-        Search for hotels using Amadeus Hotel Search API
+        FIXED: Search for hotels using direct Hotel Offers Search API approach
         
         Args:
             city_code: City code (e.g., 'NYC' for New York, 'LON' for London)
@@ -229,82 +229,44 @@ class AmadeusService:
             Dictionary containing hotel search results or error
         """
         try:
-            self.logger.info(f"Searching hotels for city: {city_code}, check-in: {check_in_date}, check-out: {check_out_date}")
+            self.logger.info(f"FIXED: Searching hotels for city: {city_code}, check-in: {check_in_date}, check-out: {check_out_date}")
             
-            # FIXED: Use Hotel List API first, then Hotel Offers Search
-            # Step 1: Get hotel list by city
-            try:
-                hotels_response = self.client.reference_data.locations.hotels.by_city.get(
-                    cityCode=city_code
-                )
-                
-                self.logger.info(f"Hotel list API response received for {city_code}")
-                
-                if not hasattr(hotels_response, 'data') or not hotels_response.data:
-                    self.logger.warning(f"No hotels found for city code: {city_code}")
-                    return {
-                        "success": False,
-                        "error": f"No hotels found for city code: {city_code}. Please try a different destination or use a standard city code like 'NYC', 'LON', 'PAR'."
-                    }
-                
-                # Extract hotel IDs (limit to max_results for offers search)
-                hotel_ids = [hotel['hotelId'] for hotel in hotels_response.data[:max_results]]
-                self.logger.info(f"Found {len(hotel_ids)} hotels for {city_code}")
-                
-            except ResponseError as hotel_list_error:
-                self.logger.error(f"Hotel list API error: {hotel_list_error}")
-                return {
-                    "success": False,
-                    "error": f"Could not find hotels for city '{city_code}'. Please try a different destination or use a standard city code like 'NYC', 'LON', 'PAR'."
-                }
+            # FIXED: Use direct Hotel Offers Search API approach
+            search_params = {
+                'cityCode': city_code,
+                'checkInDate': check_in_date,
+                'checkOutDate': check_out_date,
+                'adults': adults,
+                'roomQuantity': rooms
+            }
             
-            # Step 2: Search for hotel offers
-            if not hotel_ids:
-                return {
-                    "success": False,
-                    "error": f"No hotels available for city '{city_code}'. Please try a different destination."
-                }
+            self.logger.info(f"FIXED: Direct hotel search with params: {search_params}")
             
-            try:
-                search_params = {
-                    'hotelIds': ','.join(hotel_ids),
-                    'checkInDate': check_in_date,
-                    'checkOutDate': check_out_date,
-                    'adults': adults,
-                    'roomQuantity': rooms
+            # Make direct API call to hotel offers search
+            response = self.client.shopping.hotel_offers_search.get(**search_params)
+            
+            # Process and format results
+            hotel_offers = []
+            if hasattr(response, 'data') and response.data:
+                # Limit results to max_results
+                limited_data = response.data[:max_results] if len(response.data) > max_results else response.data
+                for hotel_data in limited_data:
+                    hotel_offers.append(self._format_hotel_offer(hotel_data))
+            
+            self.logger.info(f"FIXED: Found {len(hotel_offers)} hotel offers for {city_code}")
+            
+            return {
+                "success": True,
+                "results": hotel_offers,
+                "meta": {
+                    "count": len(hotel_offers),
+                    "search_params": search_params
                 }
-                
-                self.logger.info(f"Searching hotel offers with params: {search_params}")
-                
-                offers_response = self.client.shopping.hotel_offers_search.get(**search_params)
-                
-                # Process and format results
-                hotel_offers = []
-                if hasattr(offers_response, 'data') and offers_response.data:
-                    for hotel_data in offers_response.data:
-                        hotel_offers.append(self._format_hotel_offer(hotel_data))
-                
-                self.logger.info(f"Found {len(hotel_offers)} hotel offers for {city_code}")
-                
-                return {
-                    "success": True,
-                    "results": hotel_offers,
-                    "meta": {
-                        "count": len(hotel_offers),
-                        "search_params": search_params
-                    }
-                }
-                
-            except ResponseError as offers_error:
-                self.logger.error(f"Hotel offers API error: {offers_error}")
-                return {
-                    "success": False,
-                    "error": f"Could not find hotel offers for '{city_code}' on {check_in_date} to {check_out_date}. Please try different dates or destination."
-                }
+            }
             
         except ResponseError as e:
-            self.logger.error(f"Amadeus API error in hotel search: {e}")
-            # FIXED: Better error handling for response objects
+            self.logger.error(f"FIXED: Amadeus API error in hotel search: {e}")
+            
             error_code = "unknown"
             error_message = str(e)
             
@@ -326,13 +288,26 @@ class AmadeusService:
                 # If we can't get detailed error info, use the basic error message
                 pass
             
-            return {
-                "success": False,
-                "error": f"Hotel search failed for '{city_code}': {error_message}",
-                "error_code": error_code
-            }
+            # FIXED: Better error messages for users
+            if "400" in error_code or "invalid" in error_message.lower():
+                return {
+                    "success": False,
+                    "error": f"Invalid search parameters for '{city_code}'. Please try a major city like 'NYC', 'LON', 'PAR', or 'SYD'."
+                }
+            elif "404" in error_code or "not found" in error_message.lower():
+                return {
+                    "success": False,
+                    "error": f"No hotels found for '{city_code}'. Please try a major city like 'NYC', 'LON', 'PAR', or 'SYD'."
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Hotel search failed for '{city_code}': {error_message}",
+                    "error_code": error_code
+                }
+                
         except Exception as e:
-            self.logger.error(f"Unexpected error in hotel search: {e}")
+            self.logger.error(f"FIXED: Unexpected error in hotel search: {e}")
             return {
                 "success": False,
                 "error": f"Unexpected error searching for hotels in '{city_code}': {str(e)}"
