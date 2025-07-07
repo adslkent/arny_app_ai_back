@@ -70,10 +70,23 @@ class AmadeusService:
             
         except ResponseError as e:
             self.logger.error(f"Amadeus API error in flight search: {e}")
+            # FIXED: Better error handling for response objects
+            error_code = "unknown"
+            try:
+                if hasattr(e, 'response') and e.response:
+                    if hasattr(e.response, 'status_code'):
+                        error_code = str(e.response.status_code)
+                    elif hasattr(e.response, 'status'):
+                        error_code = str(e.response.status)
+                    elif isinstance(e.response, dict) and 'status' in e.response:
+                        error_code = str(e.response['status'])
+            except Exception:
+                error_code = "unknown"
+            
             return {
                 "success": False,
                 "error": f"Flight search failed: {str(e)}",
-                "error_code": getattr(e, 'response', {}).get('status', 'unknown')
+                "error_code": error_code
             }
         except Exception as e:
             self.logger.error(f"Unexpected error in flight search: {e}")
@@ -113,10 +126,23 @@ class AmadeusService:
                 
         except ResponseError as e:
             self.logger.error(f"Amadeus API error in flight pricing: {e}")
+            # FIXED: Better error handling for response objects
+            error_code = "unknown"
+            try:
+                if hasattr(e, 'response') and e.response:
+                    if hasattr(e.response, 'status_code'):
+                        error_code = str(e.response.status_code)
+                    elif hasattr(e.response, 'status'):
+                        error_code = str(e.response.status)
+                    elif isinstance(e.response, dict) and 'status' in e.response:
+                        error_code = str(e.response['status'])
+            except Exception:
+                error_code = "unknown"
+            
             return {
                 "success": False,
                 "error": f"Flight pricing failed: {str(e)}",
-                "error_code": getattr(e, 'response', {}).get('status', 'unknown')
+                "error_code": error_code
             }
         except Exception as e:
             self.logger.error(f"Unexpected error in flight pricing: {e}")
@@ -192,7 +218,7 @@ class AmadeusService:
         Search for hotels using Amadeus Hotel Search API
         
         Args:
-            city_code: City code (e.g., 'SYD' for Sydney)
+            city_code: City code (e.g., 'NYC' for New York, 'LON' for London)
             check_in_date: Check-in date in YYYY-MM-DD format
             check_out_date: Check-out date in YYYY-MM-DD format
             adults: Number of adults
@@ -203,58 +229,113 @@ class AmadeusService:
             Dictionary containing hotel search results or error
         """
         try:
-            # First, get hotel list by city
-            hotels_response = self.client.reference_data.locations.hotels.by_city.get(
-                cityCode=city_code
-            )
+            self.logger.info(f"Searching hotels for city: {city_code}, check-in: {check_in_date}, check-out: {check_out_date}")
             
-            if not hasattr(hotels_response, 'data') or not hotels_response.data:
+            # FIXED: Use Hotel List API first, then Hotel Offers Search
+            # Step 1: Get hotel list by city
+            try:
+                hotels_response = self.client.reference_data.locations.hotels.by_city.get(
+                    cityCode=city_code
+                )
+                
+                self.logger.info(f"Hotel list API response received for {city_code}")
+                
+                if not hasattr(hotels_response, 'data') or not hotels_response.data:
+                    self.logger.warning(f"No hotels found for city code: {city_code}")
+                    return {
+                        "success": False,
+                        "error": f"No hotels found for city code: {city_code}. Please try a different destination or use a standard city code like 'NYC', 'LON', 'PAR'."
+                    }
+                
+                # Extract hotel IDs (limit to max_results for offers search)
+                hotel_ids = [hotel['hotelId'] for hotel in hotels_response.data[:max_results]]
+                self.logger.info(f"Found {len(hotel_ids)} hotels for {city_code}")
+                
+            except ResponseError as hotel_list_error:
+                self.logger.error(f"Hotel list API error: {hotel_list_error}")
                 return {
                     "success": False,
-                    "error": f"No hotels found for city code: {city_code}"
+                    "error": f"Could not find hotels for city '{city_code}'. Please try a different destination or use a standard city code like 'NYC', 'LON', 'PAR'."
                 }
             
-            # Extract hotel IDs (limit to max_results for offers search)
-            hotel_ids = [hotel['hotelId'] for hotel in hotels_response.data[:max_results]]
-            
-            # Search for hotel offers
-            search_params = {
-                'hotelIds': ','.join(hotel_ids),
-                'checkInDate': check_in_date,
-                'checkOutDate': check_out_date,
-                'adults': adults,
-                'roomQuantity': rooms
-            }
-            
-            offers_response = self.client.shopping.hotel_offers_search.get(**search_params)
-            
-            # Process and format results
-            hotel_offers = []
-            if hasattr(offers_response, 'data') and offers_response.data:
-                for hotel_data in offers_response.data:
-                    hotel_offers.append(self._format_hotel_offer(hotel_data))
-            
-            return {
-                "success": True,
-                "results": hotel_offers,
-                "meta": {
-                    "count": len(hotel_offers),
-                    "search_params": search_params
+            # Step 2: Search for hotel offers
+            if not hotel_ids:
+                return {
+                    "success": False,
+                    "error": f"No hotels available for city '{city_code}'. Please try a different destination."
                 }
-            }
+            
+            try:
+                search_params = {
+                    'hotelIds': ','.join(hotel_ids),
+                    'checkInDate': check_in_date,
+                    'checkOutDate': check_out_date,
+                    'adults': adults,
+                    'roomQuantity': rooms
+                }
+                
+                self.logger.info(f"Searching hotel offers with params: {search_params}")
+                
+                offers_response = self.client.shopping.hotel_offers_search.get(**search_params)
+                
+                # Process and format results
+                hotel_offers = []
+                if hasattr(offers_response, 'data') and offers_response.data:
+                    for hotel_data in offers_response.data:
+                        hotel_offers.append(self._format_hotel_offer(hotel_data))
+                
+                self.logger.info(f"Found {len(hotel_offers)} hotel offers for {city_code}")
+                
+                return {
+                    "success": True,
+                    "results": hotel_offers,
+                    "meta": {
+                        "count": len(hotel_offers),
+                        "search_params": search_params
+                    }
+                }
+                
+            except ResponseError as offers_error:
+                self.logger.error(f"Hotel offers API error: {offers_error}")
+                return {
+                    "success": False,
+                    "error": f"Could not find hotel offers for '{city_code}' on {check_in_date} to {check_out_date}. Please try different dates or destination."
+                }
             
         except ResponseError as e:
             self.logger.error(f"Amadeus API error in hotel search: {e}")
+            # FIXED: Better error handling for response objects
+            error_code = "unknown"
+            error_message = str(e)
+            
+            try:
+                if hasattr(e, 'response') and e.response:
+                    if hasattr(e.response, 'status_code'):
+                        error_code = str(e.response.status_code)
+                    elif hasattr(e.response, 'status'):
+                        error_code = str(e.response.status)
+                    elif isinstance(e.response, dict) and 'status' in e.response:
+                        error_code = str(e.response['status'])
+                    
+                    # Try to get more detailed error message
+                    if hasattr(e.response, 'result') and e.response.result:
+                        error_message = str(e.response.result)
+                    elif isinstance(e.response, dict) and 'message' in e.response:
+                        error_message = e.response['message']
+            except Exception:
+                # If we can't get detailed error info, use the basic error message
+                pass
+            
             return {
                 "success": False,
-                "error": f"Hotel search failed: {str(e)}",
-                "error_code": getattr(e, 'response', {}).get('status', 'unknown')
+                "error": f"Hotel search failed for '{city_code}': {error_message}",
+                "error_code": error_code
             }
         except Exception as e:
             self.logger.error(f"Unexpected error in hotel search: {e}")
             return {
                 "success": False,
-                "error": f"Unexpected error: {str(e)}"
+                "error": f"Unexpected error searching for hotels in '{city_code}': {str(e)}"
             }
     
     async def get_hotel_offers(self, hotel_id: str, check_in_date: str, check_out_date: str,
@@ -295,10 +376,23 @@ class AmadeusService:
                 
         except ResponseError as e:
             self.logger.error(f"Amadeus API error in hotel offers: {e}")
+            # FIXED: Better error handling for response objects
+            error_code = "unknown"
+            try:
+                if hasattr(e, 'response') and e.response:
+                    if hasattr(e.response, 'status_code'):
+                        error_code = str(e.response.status_code)
+                    elif hasattr(e.response, 'status'):
+                        error_code = str(e.response.status)
+                    elif isinstance(e.response, dict) and 'status' in e.response:
+                        error_code = str(e.response['status'])
+            except Exception:
+                error_code = "unknown"
+            
             return {
                 "success": False,
                 "error": f"Hotel offers search failed: {str(e)}",
-                "error_code": getattr(e, 'response', {}).get('status', 'unknown')
+                "error_code": error_code
             }
         except Exception as e:
             self.logger.error(f"Unexpected error in hotel offers: {e}")
