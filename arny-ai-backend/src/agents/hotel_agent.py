@@ -37,21 +37,38 @@ from .user_profile_agent import UserProfileAgent
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# ===== ULTRA-OPTIMIZED City Code Mapping =====
+# ===== FIXED: Updated City Code Mapping for Hotel Search =====
 CITY_CODE_MAPPING = {
-    "london": "LON", "paris": "PAR", "newyork": "NYC", "new york": "NYC",
+    # Major US cities
+    "newyork": "NYC", "new york": "NYC", "nyc": "NYC", "manhattan": "NYC",
+    "losangeles": "LAX", "los angeles": "LAX", "la": "LAX",
+    "sanfrancisco": "SFO", "san francisco": "SFO", "sf": "SFO",
+    "chicago": "CHI", "washington": "WAS", "washington dc": "WAS",
+    "boston": "BOS", "miami": "MIA", "las vegas": "LAS", "seattle": "SEA",
+    
+    # Major European cities
+    "london": "LON", "paris": "PAR", "berlin": "BER", "frankfurt": "FRA",
+    "amsterdam": "AMS", "rome": "ROM", "madrid": "MAD", "barcelona": "BCN",
+    "milan": "MIL", "vienna": "VIE", "zurich": "ZUR", "dublin": "DUB",
+    "brussels": "BRU", "copenhagen": "CPH", "stockholm": "STO", "oslo": "OSL",
+    "helsinki": "HEL", "lisbon": "LIS", "athens": "ATH", "munich": "MUC",
+    
+    # Major Asian cities
     "tokyo": "TYO", "beijing": "PEK", "shanghai": "SHA", "hongkong": "HKG",
-    "hong kong": "HKG", "singapore": "SIN", "bangkok": "BKK", "sydney": "SYD",
-    "dubai": "DXB", "losangeles": "LAX", "los angeles": "LAX",
-    "sanfrancisco": "SFO", "san francisco": "SFO", "berlin": "BER",
-    "frankfurt": "FRA", "amsterdam": "AMS", "rome": "ROM", "madrid": "MAD",
-    "barcelona": "BCN", "moscow": "MOW", "chicago": "CHI", "washington": "WAS",
-    "boston": "BOS", "toronto": "YTO", "vancouver": "YVR", "montreal": "YMQ",
-    "milan": "MIL", "vienna": "VIE", "melbourne": "MEL", "brisbane": "BNE",
-    "perth": "PER", "adelaide": "ADL", "canberra": "CBR", "gold coast": "OOL",
-    "cairns": "CNS", "osaka": "OSA", "miami": "MIA", "las vegas": "LAS",
-    "seattle": "SEA", "zurich": "ZUR", "dublin": "DUB", "mumbai": "BOM",
-    "delhi": "DEL"
+    "hong kong": "HKG", "singapore": "SIN", "bangkok": "BKK", "seoul": "SEL",
+    "taipei": "TPE", "osaka": "OSA", "mumbai": "BOM", "delhi": "DEL",
+    "newdelhi": "DEL", "new delhi": "DEL", "kualalumpur": "KUL", "kuala lumpur": "KUL",
+    "jakarta": "CGK", "manila": "MNL",
+    
+    # Major Australian cities
+    "sydney": "SYD", "melbourne": "MEL", "brisbane": "BNE", "perth": "PER",
+    "adelaide": "ADL", "canberra": "CBR", "gold coast": "OOL", "cairns": "CNS",
+    
+    # Other major cities
+    "dubai": "DXB", "toronto": "YTO", "vancouver": "YVR", "montreal": "YMQ",
+    "moscow": "MOW", "saopaulo": "SAO", "rio de janeiro": "RIO", "riodejaneiro": "RIO",
+    "buenosaires": "BUE", "buenos aires": "BUE", "johannesburg": "JNB", "cairo": "CAI",
+    "istanbul": "IST"
 }
 
 # Global variable to store the current agent instance
@@ -100,7 +117,7 @@ Your task: Use search_hotels_tool to find hotels with dates and pricing.
 Key rules:
 1. ALWAYS use search_hotels_tool for ANY hotel request with dates
 2. If no check-out date provided, use one day after check-in
-3. Convert city names to codes: NYC, LON, PAR, etc.
+3. Convert city names to standard codes (NYC, LON, PAR, etc.)
 4. DEFAULT: adults=1, rooms=1
 5. NEVER call the same tool twice with different city variations
 
@@ -114,10 +131,10 @@ Be fast and efficient. One tool call per request."""
 async def search_hotels_tool(destination: str, check_in_date: str, check_out_date: Optional[str] = None,
                             adults: int = 1, rooms: int = 1) -> dict:
     """
-    ULTRA-OPTIMIZED: Search for hotels with timeout prevention
+    ULTRA-OPTIMIZED: Search for hotels with timeout prevention and better error handling
     
     Args:
-        destination: Destination city (e.g., 'Sydney', 'NYC')
+        destination: Destination city (e.g., 'Sydney', 'New York', 'London')
         check_in_date: Check-in date in YYYY-MM-DD format
         check_out_date: Check-out date in YYYY-MM-DD format, defaults to one day after check-in
         adults: Number of adults (default 1)
@@ -147,7 +164,7 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
         
         print(f"🔍 Processing: {destination} for {check_in_date} to {check_out_date}")
         
-        # OPTIMIZATION 3: Ultra-fast city code conversion
+        # OPTIMIZATION 3: Ultra-fast city code conversion with better fallbacks
         city_code = hotel_agent._convert_to_city_code_ultra_fast(destination)
         print(f"⚡ Fast conversion: {destination} → {city_code}")
         
@@ -197,26 +214,57 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
                 return {
                     "success": False,
                     "error": "Amadeus API timeout",
-                    "message": f"Hotel search timed out. Please try a different destination."
+                    "message": f"Hotel search timed out. Please try a different destination or check your dates."
                 }
                 
         except Exception as amadeus_error:
             print(f"❌ Amadeus API error: {amadeus_error}")
-            return {
-                "success": False,
-                "error": str(amadeus_error),
-                "message": f"Sorry, I couldn't find hotels in {destination}. Please try again."
-            }
+            # FIXED: Better error messaging based on error content
+            error_message = str(amadeus_error)
+            if "No hotels found for city code" in error_message:
+                return {
+                    "success": False,
+                    "error": f"No hotels found for '{destination}'",
+                    "message": f"I couldn't find hotels in {destination}. Please try:\n• A major city name (e.g., 'New York', 'London', 'Paris')\n• Different spelling or variation\n• A nearby major city"
+                }
+            elif "Could not find hotels for city" in error_message:
+                return {
+                    "success": False,
+                    "error": f"Invalid destination '{destination}'",
+                    "message": f"I couldn't recognize '{destination}' as a valid destination. Please try a major city like 'New York', 'London', 'Paris', 'Sydney', etc."
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": str(amadeus_error),
+                    "message": f"Sorry, I encountered an issue searching for hotels in {destination}. Please try again or use a different destination."
+                }
         
         print(f"📊 Amadeus API response: success={search_results.get('success')}, results={len(search_results.get('results', []))}")
         
         if not search_results.get("success"):
             print(f"❌ Amadeus API error: {search_results.get('error')}")
-            return {
-                "success": False,
-                "error": search_results.get("error", "Hotel search failed"),
-                "message": f"Sorry, I couldn't find hotels in {destination} for {check_in_date} to {check_out_date}."
-            }
+            amadeus_error = search_results.get("error", "Hotel search failed")
+            
+            # FIXED: Better error messaging for users
+            if "No hotels found for city code" in amadeus_error:
+                return {
+                    "success": False,
+                    "error": amadeus_error,
+                    "message": f"I couldn't find hotels in {destination}. Please try:\n• A major city name (e.g., 'New York', 'London', 'Paris')\n• Different spelling or variation\n• A nearby major city"
+                }
+            elif "Could not find hotels for city" in amadeus_error:
+                return {
+                    "success": False,
+                    "error": amadeus_error,
+                    "message": f"I couldn't recognize '{destination}' as a valid destination. Please try a major city like 'New York', 'London', 'Paris', 'Sydney', etc."
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": amadeus_error,
+                    "message": f"Sorry, I couldn't find hotels in {destination} for {check_in_date} to {check_out_date}. Please try different dates or destination."
+                }
         
         # OPTIMIZATION 6: Ultra-fast profile filtering with 10s timeout
         search_params = {
@@ -489,22 +537,36 @@ class HotelAgent:
             }
     
     def _convert_to_city_code_ultra_fast(self, location: str) -> str:
-        """ULTRA-OPTIMIZED: Ultra-fast city code conversion"""
+        """ULTRA-OPTIMIZED: Ultra-fast city code conversion with better fallbacks"""
         
-        location_lower = location.lower().strip().replace(" ", "")
+        # Clean the input
+        location_clean = location.lower().strip()
+        
+        # Remove common words that might interfere
+        location_clean = location_clean.replace("hotels in ", "").replace("hotel in ", "").replace("stay in ", "")
         
         # Direct lookup in optimized mapping
-        if location_lower in CITY_CODE_MAPPING:
-            return CITY_CODE_MAPPING[location_lower]
+        if location_clean in CITY_CODE_MAPPING:
+            return CITY_CODE_MAPPING[location_clean]
         
-        # Try with spaces for exact matches
-        location_lower_with_spaces = location.lower().strip()
-        if location_lower_with_spaces in CITY_CODE_MAPPING:
-            return CITY_CODE_MAPPING[location_lower_with_spaces]
+        # Try without spaces
+        location_no_spaces = location_clean.replace(" ", "")
+        if location_no_spaces in CITY_CODE_MAPPING:
+            return CITY_CODE_MAPPING[location_no_spaces]
         
         # If already looks like city code (3 letters)
         if len(location) == 3 and location.isalpha():
             return location.upper()
         
-        # Default: return as-is
-        return location.upper()
+        # Try partial matches for common city names
+        for city_key, city_code in CITY_CODE_MAPPING.items():
+            if city_key in location_clean or location_clean in city_key:
+                return city_code
+        
+        # Default: return cleaned input as uppercase
+        # This will let Amadeus API handle unknown cities
+        cleaned_code = location.strip().replace(" ", "").upper()[:3]
+        if len(cleaned_code) >= 2:
+            return cleaned_code
+        else:
+            return location.upper()
