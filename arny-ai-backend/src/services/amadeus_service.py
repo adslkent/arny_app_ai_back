@@ -70,18 +70,7 @@ class AmadeusService:
             
         except ResponseError as e:
             self.logger.error(f"Amadeus API error in flight search: {e}")
-            # FIXED: Better error handling for response objects
-            error_code = "unknown"
-            try:
-                if hasattr(e, 'response') and e.response:
-                    if hasattr(e.response, 'status_code'):
-                        error_code = str(e.response.status_code)
-                    elif hasattr(e.response, 'status'):
-                        error_code = str(e.response.status)
-                    elif isinstance(e.response, dict) and 'status' in e.response:
-                        error_code = str(e.response['status'])
-            except Exception:
-                error_code = "unknown"
+            error_code = self._extract_error_code(e)
             
             return {
                 "success": False,
@@ -126,18 +115,7 @@ class AmadeusService:
                 
         except ResponseError as e:
             self.logger.error(f"Amadeus API error in flight pricing: {e}")
-            # FIXED: Better error handling for response objects
-            error_code = "unknown"
-            try:
-                if hasattr(e, 'response') and e.response:
-                    if hasattr(e.response, 'status_code'):
-                        error_code = str(e.response.status_code)
-                    elif hasattr(e.response, 'status'):
-                        error_code = str(e.response.status)
-                    elif isinstance(e.response, dict) and 'status' in e.response:
-                        error_code = str(e.response['status'])
-            except Exception:
-                error_code = "unknown"
+            error_code = self._extract_error_code(e)
             
             return {
                 "success": False,
@@ -210,12 +188,12 @@ class AmadeusService:
             self.logger.error(f"Error formatting flight offer: {e}")
             return offer  # Return original if formatting fails
     
-    # ==================== HOTEL OPERATIONS - FIXED ====================
+    # ==================== HOTEL OPERATIONS - COMPLETELY FIXED ====================
     
     async def search_hotels(self, city_code: str, check_in_date: str, check_out_date: str,
                           adults: int = 1, rooms: int = 1, max_results: int = 20) -> Dict[str, Any]:
         """
-        FIXED: Search for hotels using direct Hotel Offers Search API approach
+        COMPLETELY FIXED: Search for hotels using two-step approach
         
         Args:
             city_code: City code (e.g., 'NYC' for New York, 'LON' for London)
@@ -229,9 +207,96 @@ class AmadeusService:
             Dictionary containing hotel search results or error
         """
         try:
-            self.logger.info(f"FIXED: Searching hotels for city: {city_code}, check-in: {check_in_date}, check-out: {check_out_date}")
+            self.logger.info(f"FIXED: Starting hotel search for city: {city_code}")
             
-            # FIXED: Use direct Hotel Offers Search API approach
+            # STEP 1: Get hotels by city using reference data API
+            try:
+                self.logger.info(f"STEP 1: Getting hotel list for city {city_code}")
+                hotels_response = self.client.reference_data.locations.hotels.by_city.get(cityCode=city_code)
+                
+                if not hasattr(hotels_response, 'data') or not hotels_response.data:
+                    return {
+                        "success": False,
+                        "error": f"No hotels found for city code '{city_code}'. Please try a major city like 'NYC', 'LON', 'PAR', or 'SYD'."
+                    }
+                
+                # Get hotel IDs (limit to first 20 for performance)
+                hotel_ids = []
+                for hotel in hotels_response.data[:20]:
+                    hotel_id = hotel.get('hotelId')
+                    if hotel_id:
+                        hotel_ids.append(hotel_id)
+                
+                self.logger.info(f"Found {len(hotel_ids)} hotels in {city_code}")
+                
+                if not hotel_ids:
+                    return {
+                        "success": False,
+                        "error": f"No valid hotels found for '{city_code}'. Please try a different destination."
+                    }
+                
+            except ResponseError as hotels_error:
+                self.logger.error(f"Error getting hotel list: {hotels_error}")
+                # Fallback: try direct hotel offers search
+                return await self._fallback_direct_hotel_search(city_code, check_in_date, check_out_date, adults, rooms, max_results)
+            
+            # STEP 2: Search for offers using hotel IDs
+            try:
+                self.logger.info(f"STEP 2: Searching offers for {len(hotel_ids)} hotels")
+                
+                # Convert hotel IDs to comma-separated string
+                hotel_ids_str = ','.join(hotel_ids[:10])  # Limit to 10 hotels for performance
+                
+                search_params = {
+                    'hotelIds': hotel_ids_str,
+                    'checkInDate': check_in_date,
+                    'checkOutDate': check_out_date,
+                    'adults': adults,
+                    'roomQuantity': rooms
+                }
+                
+                offers_response = self.client.shopping.hotel_offers_search.get(**search_params)
+                
+                # Process and format results
+                hotel_offers = []
+                if hasattr(offers_response, 'data') and offers_response.data:
+                    # Limit results to max_results
+                    limited_data = offers_response.data[:max_results]
+                    for hotel_data in limited_data:
+                        hotel_offers.append(self._format_hotel_offer(hotel_data))
+                
+                self.logger.info(f"Found {len(hotel_offers)} hotel offers for {city_code}")
+                
+                return {
+                    "success": True,
+                    "results": hotel_offers,
+                    "meta": {
+                        "count": len(hotel_offers),
+                        "city_code": city_code,
+                        "search_params": search_params
+                    }
+                }
+                
+            except ResponseError as offers_error:
+                self.logger.error(f"Error getting hotel offers: {offers_error}")
+                # Try fallback method
+                return await self._fallback_direct_hotel_search(city_code, check_in_date, check_out_date, adults, rooms, max_results)
+                
+        except Exception as e:
+            self.logger.error(f"Unexpected error in hotel search: {e}")
+            return {
+                "success": False,
+                "error": f"Unexpected error searching for hotels: {str(e)}"
+            }
+    
+    async def _fallback_direct_hotel_search(self, city_code: str, check_in_date: str, check_out_date: str,
+                                          adults: int, rooms: int, max_results: int) -> Dict[str, Any]:
+        """
+        Fallback method: Try direct hotel offers search by city
+        """
+        try:
+            self.logger.info(f"FALLBACK: Direct hotel search for {city_code}")
+            
             search_params = {
                 'cityCode': city_code,
                 'checkInDate': check_in_date,
@@ -240,78 +305,51 @@ class AmadeusService:
                 'roomQuantity': rooms
             }
             
-            self.logger.info(f"FIXED: Direct hotel search with params: {search_params}")
-            
-            # Make direct API call to hotel offers search
             response = self.client.shopping.hotel_offers_search.get(**search_params)
             
-            # Process and format results
             hotel_offers = []
             if hasattr(response, 'data') and response.data:
-                # Limit results to max_results
-                limited_data = response.data[:max_results] if len(response.data) > max_results else response.data
+                limited_data = response.data[:max_results]
                 for hotel_data in limited_data:
                     hotel_offers.append(self._format_hotel_offer(hotel_data))
             
-            self.logger.info(f"FIXED: Found {len(hotel_offers)} hotel offers for {city_code}")
-            
-            return {
-                "success": True,
-                "results": hotel_offers,
-                "meta": {
-                    "count": len(hotel_offers),
-                    "search_params": search_params
-                }
-            }
-            
-        except ResponseError as e:
-            self.logger.error(f"FIXED: Amadeus API error in hotel search: {e}")
-            
-            error_code = "unknown"
-            error_message = str(e)
-            
-            try:
-                if hasattr(e, 'response') and e.response:
-                    if hasattr(e.response, 'status_code'):
-                        error_code = str(e.response.status_code)
-                    elif hasattr(e.response, 'status'):
-                        error_code = str(e.response.status)
-                    elif isinstance(e.response, dict) and 'status' in e.response:
-                        error_code = str(e.response['status'])
-                    
-                    # Try to get more detailed error message
-                    if hasattr(e.response, 'result') and e.response.result:
-                        error_message = str(e.response.result)
-                    elif isinstance(e.response, dict) and 'message' in e.response:
-                        error_message = e.response['message']
-            except Exception:
-                # If we can't get detailed error info, use the basic error message
-                pass
-            
-            # FIXED: Better error messages for users
-            if "400" in error_code or "invalid" in error_message.lower():
+            if hotel_offers:
+                self.logger.info(f"FALLBACK SUCCESS: Found {len(hotel_offers)} hotels")
                 return {
-                    "success": False,
-                    "error": f"Invalid search parameters for '{city_code}'. Please try a major city like 'NYC', 'LON', 'PAR', or 'SYD'."
-                }
-            elif "404" in error_code or "not found" in error_message.lower():
-                return {
-                    "success": False,
-                    "error": f"No hotels found for '{city_code}'. Please try a major city like 'NYC', 'LON', 'PAR', or 'SYD'."
+                    "success": True,
+                    "results": hotel_offers,
+                    "meta": {
+                        "count": len(hotel_offers),
+                        "search_params": search_params,
+                        "method": "fallback_direct"
+                    }
                 }
             else:
                 return {
                     "success": False,
-                    "error": f"Hotel search failed for '{city_code}': {error_message}",
-                    "error_code": error_code
+                    "error": f"Could not find hotels for city '{city_code}'. Please try a major city name or different destination."
                 }
                 
-        except Exception as e:
-            self.logger.error(f"FIXED: Unexpected error in hotel search: {e}")
-            return {
-                "success": False,
-                "error": f"Unexpected error searching for hotels in '{city_code}': {str(e)}"
-            }
+        except ResponseError as e:
+            self.logger.error(f"Fallback hotel search also failed: {e}")
+            error_code = self._extract_error_code(e)
+            
+            # Provide user-friendly error messages
+            if "400" in error_code or "invalid" in str(e).lower():
+                return {
+                    "success": False,
+                    "error": f"Invalid destination '{city_code}'. Please try a major city like 'New York', 'London', 'Paris', or 'Sydney'."
+                }
+            elif "404" in error_code or "not found" in str(e).lower():
+                return {
+                    "success": False,
+                    "error": f"No hotels found for '{city_code}'. Please try a major city like 'New York', 'London', 'Paris', or 'Sydney'."
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Could not find hotels for city '{city_code}'. Please try a different destination."
+                }
     
     async def get_hotel_offers(self, hotel_id: str, check_in_date: str, check_out_date: str,
                              adults: int = 1, rooms: int = 1) -> Dict[str, Any]:
@@ -351,18 +389,7 @@ class AmadeusService:
                 
         except ResponseError as e:
             self.logger.error(f"Amadeus API error in hotel offers: {e}")
-            # FIXED: Better error handling for response objects
-            error_code = "unknown"
-            try:
-                if hasattr(e, 'response') and e.response:
-                    if hasattr(e.response, 'status_code'):
-                        error_code = str(e.response.status_code)
-                    elif hasattr(e.response, 'status'):
-                        error_code = str(e.response.status)
-                    elif isinstance(e.response, dict) and 'status' in e.response:
-                        error_code = str(e.response['status'])
-            except Exception:
-                error_code = "unknown"
+            error_code = self._extract_error_code(e)
             
             return {
                 "success": False,
@@ -426,3 +453,74 @@ class AmadeusService:
         except Exception as e:
             self.logger.error(f"Error formatting hotel offer: {e}")
             return hotel_data  # Return original if formatting fails
+    
+    def _extract_error_code(self, error: ResponseError) -> str:
+        """Extract error code from Amadeus ResponseError"""
+        error_code = "unknown"
+        try:
+            if hasattr(error, 'response') and error.response:
+                if hasattr(error.response, 'status_code'):
+                    error_code = str(error.response.status_code)
+                elif hasattr(error.response, 'status'):
+                    error_code = str(error.response.status)
+                elif isinstance(error.response, dict) and 'status' in error.response:
+                    error_code = str(error.response['status'])
+        except Exception:
+            error_code = "unknown"
+        return error_code
+    
+    # ==================== AIRPORT/LOCATION SEARCH ====================
+    
+    async def search_airports(self, keyword: str, subtype: str = "AIRPORT") -> List[Dict[str, Any]]:
+        """
+        Search for airports/locations by keyword
+        
+        Args:
+            keyword: Search keyword (city name, airport code, etc.)
+            subtype: Type of location (AIRPORT, CITY, etc.)
+            
+        Returns:
+            List of matching airports/locations
+        """
+        try:
+            response = self.client.reference_data.locations.get(
+                keyword=keyword,
+                subType=subtype
+            )
+            
+            if hasattr(response, 'data') and response.data:
+                return [location for location in response.data]
+            else:
+                return []
+                
+        except ResponseError as e:
+            self.logger.error(f"Error searching airports: {e}")
+            return []
+        except Exception as e:
+            self.logger.error(f"Unexpected error searching airports: {e}")
+            return []
+    
+    async def get_flight_checkin_links(self, airline_code: str) -> List[Dict[str, Any]]:
+        """
+        Get check-in links for an airline
+        
+        Args:
+            airline_code: IATA airline code (e.g., 'CA' for Air China)
+            
+        Returns:
+            List of check-in links for the airline
+        """
+        try:
+            response = self.client.reference_data.urls.checkin_links.get(airlineCode=airline_code)
+            
+            if hasattr(response, 'data') and response.data:
+                return [link for link in response.data]
+            else:
+                return []
+                
+        except ResponseError as e:
+            self.logger.error(f"Error getting check-in links: {e}")
+            return []
+        except Exception as e:
+            self.logger.error(f"Unexpected error getting check-in links: {e}")
+            return []
