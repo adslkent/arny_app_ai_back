@@ -427,6 +427,32 @@ def validate_group_code_tool(group_code: str) -> dict:
         return {"valid": False, "error": str(e)}
 
 @function_tool
+def decline_group_invites_tool() -> dict:
+    """
+    Mark that the user declined to send group invites (for admin users)
+    """
+    try:
+        agent = _get_onboarding_agent()
+        if not agent:
+            return {"success": False, "error": "Agent not available"}
+        
+        print("⏭️ User declined to send group invites")
+        
+        # Mark that user declined group invites
+        agent.current_collected_data["group_invites_declined"] = True
+        
+        print(f"📈 Updated collected data: {agent.current_collected_data}")
+        
+        return {
+            "success": True,
+            "message": "Group invites declined. You can always invite people later through the app."
+        }
+        
+    except Exception as e:
+        print(f"❌ Error in decline_group_invites_tool: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+@function_tool
 def skip_group_setup_tool() -> dict:
     """
     Skip group setup - automatically generate a random group code for the user (hidden from user)
@@ -499,7 +525,7 @@ def skip_group_setup_tool() -> dict:
 
 class OnboardingAgent:
     """
-    Enhanced LLM-driven onboarding agent with improved email scanning capabilities
+    Enhanced LLM-driven onboarding agent with improved completion detection
     """
     
     def __init__(self):
@@ -555,6 +581,7 @@ class OnboardingAgent:
                 "If the user says yes, respond with 'Please invite users to your new group by providing their email addresses.' "
                 "When they provide email addresses, respond with 'To confirm, I will be sending invites to {list all provided email addresses}. Are they correct?' "
                 "If they confirm yes, use send_group_invites_tool to send the invitation emails. "
+                "If the user says no to setting up a group or declines to send invites, use decline_group_invites_tool to mark this step as complete. "
                 "If email sending fails, gracefully explain that the group code can be shared manually.\n\n"
                 "Finally, ONLY when all the above onboarding process is completed, respond: "
                 "'Thank you, this completes your onboarding to Arny!'\n\n"
@@ -573,6 +600,7 @@ class OnboardingAgent:
                 store_financial_info_tool,
                 store_holiday_preferences_tool,
                 send_group_invites_tool,
+                decline_group_invites_tool,
                 validate_group_code_tool,
                 skip_group_setup_tool
             ]
@@ -581,7 +609,7 @@ class OnboardingAgent:
     async def process_message(self, user_id: str, message: str, session_id: str, 
                             current_progress: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process message using OpenAI Agents SDK with enhanced email capabilities and better error handling
+        Process message using OpenAI Agents SDK with enhanced completion detection
         """
         
         try:
@@ -616,7 +644,7 @@ class OnboardingAgent:
             
             # Process with agent
             if not conversation_history:
-                # First message
+                # First message in conversation
                 print("🚀 Starting new conversation")
                 result = await Runner.run(self.agent, message)
             else:
@@ -636,8 +664,8 @@ class OnboardingAgent:
             if len(conversation_history) > 20:
                 conversation_history = conversation_history[-20:]
             
-            # Check if onboarding is complete using LLM-based detection
-            onboarding_complete = await self._detect_onboarding_completion(assistant_message)
+            # ENHANCED: Check if onboarding is complete using both data-based and LLM-based detection
+            onboarding_complete = await self._detect_onboarding_completion_enhanced(assistant_message)
             
             # Update progress
             updated_progress = {
@@ -656,7 +684,11 @@ class OnboardingAgent:
             else:
                 # Complete onboarding
                 print("🎉 Completing onboarding...")
-                await self.db.complete_onboarding(user_id, self.current_collected_data)
+                completion_success = await self.db.complete_onboarding(user_id, self.current_collected_data)
+                print(f"💾 Onboarding completion in database: {completion_success}")
+                
+                if not completion_success:
+                    print("⚠️ Database completion failed, but marking as complete anyway")
             
             return {
                 "message": assistant_message,
@@ -676,8 +708,75 @@ class OnboardingAgent:
                 "error": str(e)
             }
     
-    async def _detect_onboarding_completion(self, message: str) -> bool:
-        """Detect if the agent has completed onboarding using LLM analysis"""
+    async def _detect_onboarding_completion_enhanced(self, message: str) -> bool:
+        """Enhanced onboarding completion detection using both data completeness and LLM analysis"""
+        try:
+            print(f"🔍 Enhanced completion detection for message: '{message[:100]}...'")
+            
+            # Method 1: Data-based completion check (primary method)
+            data_complete = self._check_data_completeness()
+            print(f"📊 Data completeness check: {data_complete}")
+            
+            # Method 2: LLM-based completion check (secondary method)
+            llm_complete = await self._detect_onboarding_completion_llm(message)
+            print(f"🤖 LLM completion check: {llm_complete}")
+            
+            # Method 3: Phrase-based completion check (fallback method)
+            phrase_complete = self._fallback_phrase_detection(message)
+            print(f"📝 Phrase completion check: {phrase_complete}")
+            
+            # Completion logic: Data complete AND (LLM complete OR phrase complete)
+            # This ensures all data is collected but also respects the agent's intention
+            final_complete = data_complete and (llm_complete or phrase_complete)
+            
+            print(f"🏁 Final completion decision: {final_complete} (data: {data_complete}, llm: {llm_complete}, phrase: {phrase_complete})")
+            
+            return final_complete
+            
+        except Exception as e:
+            print(f"❌ Error in enhanced completion detection: {e}")
+            # Fallback to data completeness only
+            return self._check_data_completeness()
+    
+    def _check_data_completeness(self) -> bool:
+        """Check if all required onboarding data has been collected"""
+        try:
+            required_fields = [
+                "group_code",           # Group setup completed
+                "email",               # Email provided
+                "name", "gender", "birthdate", "city",  # Personal info
+                "employer", "working_schedule", "holiday_frequency",  # Job details
+                "annual_income", "monthly_spending",  # Financial info
+                "holiday_preferences"  # Holiday preferences
+            ]
+            
+            missing_fields = []
+            for field in required_fields:
+                if not self.current_collected_data.get(field):
+                    missing_fields.append(field)
+            
+            is_complete = len(missing_fields) == 0
+            
+            if missing_fields:
+                print(f"📋 Missing required fields: {missing_fields}")
+            else:
+                print(f"✅ All required data collected!")
+            
+            # Additional check for group invites (if applicable)
+            if is_complete and self.current_collected_data.get("group_role") == "admin":
+                # For admin users, check if they've been asked about group invites
+                if not self.current_collected_data.get("group_invites_sent") and not self.current_collected_data.get("group_invites_declined"):
+                    print(f"⏳ Admin user hasn't completed group invites step yet")
+                    is_complete = False
+            
+            return is_complete
+            
+        except Exception as e:
+            print(f"❌ Error checking data completeness: {e}")
+            return False
+    
+    async def _detect_onboarding_completion_llm(self, message: str) -> bool:
+        """LLM-based onboarding completion detection"""
         try:
             print(f"🔍 Using LLM to detect onboarding completion for message: '{message[:100]}...'")
             
@@ -740,7 +839,9 @@ Respond with only "YES" if the message clearly indicates onboarding completion, 
             "your onboarding to arny is complete",
             "onboarding to arny is now complete",
             "thank you, this completes your onboarding",
-            "that completes your onboarding"
+            "that completes your onboarding",
+            "onboarding complete",
+            "welcome to arny"
         ]
 
         # Check if any completion phrase is found
