@@ -1,12 +1,12 @@
 """
-Database operations for Arny AI - FIXED VERSION
+Database operations for Arny AI - ENHANCED VERSION
 
-Fixed Issues:
-1. Consistent UUID validation across all methods
+Enhanced Features:
+1. Robust UUID validation across all methods
 2. Better error handling for UUID validation
 3. Improved progress loading and saving with better JSON handling
-4. FIXED: Better session_id handling in conversation methods
-5. ENHANCED: Improved onboarding completion with verification and force completion
+4. Enhanced onboarding completion with verification and force completion
+5. Better session_id handling in conversation methods
 """
 
 from typing import Optional, Dict, Any, List, Union, Tuple
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 class DatabaseOperations:
     """
-    Database operations using Supabase - FIXED VERSION
+    Database operations using Supabase - ENHANCED VERSION
     
     This class provides all database operations for the Arny AI application.
     It uses Supabase as the backend and handles all CRUD operations with
@@ -51,7 +51,7 @@ class DatabaseOperations:
     
     def _validate_and_format_uuid(self, user_id: str, field_name: str = "UUID") -> tuple[bool, str]:
         """
-        FIXED: Consistent UUID validation and formatting across all methods with better error messages
+        Enhanced UUID validation and formatting across all methods with better error messages
         
         Args:
             user_id: User ID to validate
@@ -93,7 +93,7 @@ class DatabaseOperations:
     
     async def get_user_profile(self, user_id: str) -> Optional[UserProfile]:
         """
-        Get user profile by user_id - FIXED VERSION
+        Get user profile by user_id - ENHANCED VERSION
         """
         try:
             # Use consistent UUID validation
@@ -120,7 +120,7 @@ class DatabaseOperations:
     
     async def create_user_profile(self, profile: UserProfile) -> bool:
         """
-        Create a new user profile - FIXED VERSION
+        Create a new user profile - ENHANCED VERSION
         """
         try:
             # Validate the user_id in the profile
@@ -161,7 +161,7 @@ class DatabaseOperations:
     
     async def update_user_profile(self, user_id: str, updates: Dict[str, Any]) -> bool:
         """
-        Update user profile - FIXED VERSION
+        Update user profile - ENHANCED VERSION
         """
         try:
             # Use consistent UUID validation
@@ -200,7 +200,7 @@ class DatabaseOperations:
     
     async def delete_user_profile(self, user_id: str) -> bool:
         """
-        Delete user profile (soft delete by setting is_active to False) - FIXED VERSION
+        Delete user profile (soft delete by setting is_active to False) - ENHANCED VERSION
         """
         try:
             logger.info(f"Soft deleting user profile for user_id: {user_id}")
@@ -218,7 +218,7 @@ class DatabaseOperations:
     
     async def complete_onboarding(self, user_id: str, profile_data: Dict[str, Any]) -> bool:
         """
-        Mark onboarding as complete and update profile - ENHANCED VERSION with better error handling
+        Mark onboarding as complete and update profile - ENHANCED VERSION with verification and force completion
         """
         try:
             # Use consistent UUID validation
@@ -268,7 +268,7 @@ class DatabaseOperations:
                 
                 logger.info(f"Onboarding completed successfully for user_id: {validated_user_id}")
                 
-                # Verify the update by checking the profile
+                # ENHANCED: Verify the update by checking the profile
                 try:
                     updated_profile = await self.get_user_profile(validated_user_id)
                     if updated_profile:
@@ -278,13 +278,20 @@ class DatabaseOperations:
                             # Try one more time with a direct update
                             direct_success = await self._force_onboarding_completion(validated_user_id)
                             print(f"🔧 Force completion attempt: {direct_success}")
+                            return direct_success
                     else:
                         print(f"⚠️ Could not retrieve profile for verification")
+                        # Try force completion as fallback
+                        return await self._force_onboarding_completion(validated_user_id)
                 except Exception as verify_error:
                     print(f"⚠️ Error during verification: {verify_error}")
+                    # Try force completion as fallback
+                    return await self._force_onboarding_completion(validated_user_id)
             else:
                 print(f"❌ Profile update failed!")
                 logger.error(f"Failed to update user profile during onboarding completion for user_id: {validated_user_id}")
+                # Try force completion as fallback
+                return await self._force_onboarding_completion(validated_user_id)
 
             return success
         
@@ -293,27 +300,50 @@ class DatabaseOperations:
             print(f"❌ Exception in complete_onboarding: {e}")
             import traceback
             traceback.print_exc()
-            return False
+            # Try force completion as fallback
+            try:
+                return await self._force_onboarding_completion(user_id)
+            except:
+                return False
     
     async def _force_onboarding_completion(self, user_id: str) -> bool:
-        """Force onboarding completion with a direct database update"""
+        """ENHANCED: Force onboarding completion with a direct database update"""
         try:
-            logger.info(f"Force completing onboarding for user_id: {user_id}")
-            print(f"🔧 Force completing onboarding for user: {user_id}")
+            # Validate user_id first
+            is_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
+            if not is_valid:
+                logger.error(f"Invalid user_id format in _force_onboarding_completion: {validated_user_id}")
+                return False
+            
+            logger.info(f"Force completing onboarding for user_id: {validated_user_id}")
+            print(f"🔧 Force completing onboarding for user: {validated_user_id}")
             
             # Direct update with minimal data
             response = self.client.table("user_profiles").update({
                 "onboarding_completed": True,
                 "updated_at": datetime.utcnow().isoformat()
-            }).eq("user_id", user_id).execute()
+            }).eq("user_id", validated_user_id).execute()
             
             success = len(response.data) > 0
             print(f"🔧 Force completion result: {success}")
             
             if success:
-                logger.info(f"Force onboarding completion successful for user_id: {user_id}")
+                logger.info(f"Force onboarding completion successful for user_id: {validated_user_id}")
+                # Double-check the result
+                try:
+                    verification_profile = await self.get_user_profile(validated_user_id)
+                    if verification_profile:
+                        final_status = verification_profile.onboarding_completed
+                        print(f"🔍 Final verification: onboarding_completed = {final_status}")
+                        return final_status
+                    else:
+                        print(f"⚠️ Could not verify final status")
+                        return success
+                except Exception as verify_error:
+                    print(f"⚠️ Final verification error: {verify_error}")
+                    return success
             else:
-                logger.error(f"Force onboarding completion failed for user_id: {user_id}")
+                logger.error(f"Force onboarding completion failed for user_id: {validated_user_id}")
             
             return success
             
@@ -322,11 +352,11 @@ class DatabaseOperations:
             print(f"❌ Error in force completion: {e}")
             return False
     
-    # ==================== ONBOARDING OPERATIONS - FIXED ====================
+    # ==================== ONBOARDING OPERATIONS - ENHANCED ====================
     
     async def get_onboarding_progress(self, user_id: str) -> Optional[OnboardingProgress]:
         """
-        Get onboarding progress for user - FIXED VERSION with better JSON handling
+        Get onboarding progress for user - ENHANCED VERSION with better JSON handling
         """
         try:
             # Use consistent UUID validation
@@ -342,7 +372,7 @@ class DatabaseOperations:
             if response.data and len(response.data) > 0:
                 progress_data = response.data[0]
                 
-                # FIXED: Better handling of collected_data JSON parsing
+                # ENHANCED: Better handling of collected_data JSON parsing
                 collected_data = progress_data.get("collected_data")
                 if collected_data:
                     if isinstance(collected_data, str):
@@ -373,7 +403,7 @@ class DatabaseOperations:
     
     async def update_onboarding_progress(self, user_id: str, step: OnboardingStep, data: Dict[str, Any]) -> bool:
         """
-        Update onboarding progress - FIXED VERSION with better JSON handling
+        Update onboarding progress - ENHANCED VERSION with better JSON handling
         """
         try:
             # Use consistent UUID validation
@@ -384,7 +414,7 @@ class DatabaseOperations:
             
             logger.info(f"Updating onboarding progress for user_id: {validated_user_id}, step: {step.value}")
             
-            # FIXED: Ensure data is properly formatted for JSON storage
+            # ENHANCED: Ensure data is properly formatted for JSON storage
             # The data should already be in the correct format from the agent
             collected_data_json = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
             
@@ -415,7 +445,7 @@ class DatabaseOperations:
             logger.error(f"Error updating onboarding progress for {user_id}: {e}")
             return False  # Return False instead of raising exception
     
-    # ==================== GROUP OPERATIONS - FIXED ====================
+    # ==================== GROUP OPERATIONS - ENHANCED ====================
     
     async def get_group_members(self, group_code: str) -> List[GroupMember]:
         """
@@ -437,7 +467,7 @@ class DatabaseOperations:
     
     async def add_group_member(self, group_code: str, user_id: str, role: str = "member") -> bool:
         """
-        Add user to a group - FIXED VERSION
+        Add user to a group - ENHANCED VERSION
         """
         try:
             # Use consistent UUID validation
@@ -479,7 +509,7 @@ class DatabaseOperations:
     
     async def remove_group_member(self, group_code: str, user_id: str) -> bool:
         """
-        Remove user from a group (soft delete) - FIXED VERSION
+        Remove user from a group (soft delete) - ENHANCED VERSION
         """
         try:
             # Use consistent UUID validation
@@ -545,7 +575,7 @@ class DatabaseOperations:
     
     async def get_user_groups(self, user_id: str) -> List[str]:
         """
-        Get all groups a user belongs to - FIXED VERSION
+        Get all groups a user belongs to - ENHANCED VERSION
         """
         try:
             # Use consistent UUID validation
@@ -567,11 +597,11 @@ class DatabaseOperations:
             logger.error(f"Error getting user groups for {user_id}: {e}")
             return []  # Return empty list instead of raising exception
     
-    # ==================== USER STATUS CHECK - FIXED ====================
+    # ==================== USER STATUS CHECK - ENHANCED ====================
     
     async def get_user_status(self, user_id: str) -> Optional[Dict[str, Any]]:
         """
-        Get user status including onboarding completion - FIXED VERSION
+        Get user status including onboarding completion - ENHANCED VERSION
         """
         try:
             # Use consistent UUID validation
@@ -611,14 +641,14 @@ class DatabaseOperations:
             logger.error(f"Error getting user status for {user_id}: {e}")
             return None  # Return None instead of raising exception
     
-    # ==================== CHAT OPERATIONS - FIXED ====================
+    # ==================== CHAT OPERATIONS - ENHANCED ====================
     
     async def save_chat_message(self, message: ChatMessage) -> bool:
         """
-        Save a chat message - FIXED VERSION with better validation
+        Save a chat message - ENHANCED VERSION with better validation
         """
         try:
-            # FIXED: Validate required fields before saving
+            # ENHANCED: Validate required fields before saving
             if not message.user_id:
                 logger.error("Cannot save chat message: user_id is missing")
                 return False
@@ -660,10 +690,10 @@ class DatabaseOperations:
     
     async def get_conversation_history(self, user_id: str, session_id: str, limit: int = 50) -> List[ChatMessage]:
         """
-        Get conversation history for a session - FIXED VERSION with better error handling
+        Get conversation history for a session - ENHANCED VERSION with better error handling
         """
         try:
-            # FIXED: Better UUID validation with specific field names
+            # ENHANCED: Better UUID validation with specific field names
             is_valid_user, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
             is_valid_session, validated_session_id = self._validate_and_format_uuid(session_id, "session_id")
             
@@ -706,10 +736,10 @@ class DatabaseOperations:
     async def save_conversation_turn(self, user_id: str, session_id: str, user_message: str, 
                                    assistant_response: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """
-        Save a complete conversation turn (user message + assistant response) - FIXED VERSION
+        Save a complete conversation turn (user message + assistant response) - ENHANCED VERSION
         """
         try:
-            # FIXED: Validate inputs before creating ChatMessage objects
+            # ENHANCED: Validate inputs before creating ChatMessage objects
             if not user_id or not session_id:
                 logger.error(f"Cannot save conversation: user_id or session_id is missing")
                 return False
@@ -828,7 +858,7 @@ class DatabaseOperations:
     
     async def get_user_preferences(self, user_id: str) -> Optional[UserPreferences]:
         """
-        Get user preferences - FIXED VERSION
+        Get user preferences - ENHANCED VERSION
         """
         try:
             # Use consistent UUID validation
