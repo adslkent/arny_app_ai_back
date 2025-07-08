@@ -525,14 +525,14 @@ def skip_group_setup_tool() -> dict:
 
 class OnboardingAgent:
     """
-    Enhanced LLM-driven onboarding agent with improved completion detection
+    Enhanced LLM-driven onboarding agent with robust completion detection
     """
     
     def __init__(self):
         global _current_onboarding_agent
         
         self.openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
-        self.email_service = EmailService()  # Use the enhanced email service
+        self.email_service = EmailService()
         self.db = DatabaseOperations()
         self.group_generator = GroupCodeGenerator()
         
@@ -664,7 +664,7 @@ class OnboardingAgent:
             if len(conversation_history) > 20:
                 conversation_history = conversation_history[-20:]
             
-            # ENHANCED: Check if onboarding is complete using both data-based and LLM-based detection
+            # ENHANCED: Check if onboarding is complete using multiple detection methods
             onboarding_complete = await self._detect_onboarding_completion_enhanced(assistant_message)
             
             # Update progress
@@ -709,7 +709,7 @@ class OnboardingAgent:
             }
     
     async def _detect_onboarding_completion_enhanced(self, message: str) -> bool:
-        """Enhanced onboarding completion detection using both data completeness and LLM analysis"""
+        """Enhanced onboarding completion detection using multiple methods"""
         try:
             print(f"🔍 Enhanced completion detection for message: '{message[:100]}...'")
             
@@ -870,7 +870,7 @@ Respond with only "YES" if the message clearly indicates onboarding completion, 
             return "collecting_financial_info"
         elif not collected_data.get("holiday_preferences"):
             return "collecting_holiday_preferences"
-        elif collected_data.get("group_role") == "admin" and not collected_data.get("group_invites_sent"):
+        elif collected_data.get("group_role") == "admin" and not collected_data.get("group_invites_sent") and not collected_data.get("group_invites_declined"):
             return "offering_group_invites"
         else:
             return "ready_to_complete"
