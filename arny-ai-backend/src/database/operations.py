@@ -6,6 +6,7 @@ Fixed Issues:
 2. Better error handling for UUID validation
 3. Improved progress loading and saving with better JSON handling
 4. FIXED: Better session_id handling in conversation methods
+5. ENHANCED: Improved onboarding completion with verification and force completion
 """
 
 from typing import Optional, Dict, Any, List, Union, Tuple
@@ -217,10 +218,18 @@ class DatabaseOperations:
     
     async def complete_onboarding(self, user_id: str, profile_data: Dict[str, Any]) -> bool:
         """
-        Mark onboarding as complete and update profile - FIXED VERSION
+        Mark onboarding as complete and update profile - ENHANCED VERSION with better error handling
         """
         try:
-            logger.info(f"Completing onboarding for user_id: {user_id}")
+            # Use consistent UUID validation
+            is_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
+            if not is_valid:
+                logger.error(f"Invalid user_id format in complete_onboarding: {validated_user_id}")
+                return False
+            
+            logger.info(f"Completing onboarding for user_id: {validated_user_id}")
+            print(f"🎉 Starting onboarding completion for user: {validated_user_id}")
+            print(f"📊 Profile data received: {list(profile_data.keys())}")
             
             # Filter out fields that don't belong in user_profiles table
             user_profile_fields = {
@@ -233,25 +242,84 @@ class DatabaseOperations:
             # Filter profile data to only include fields that exist in user_profiles table
             filtered_profile_data = {
                 key: value for key, value in profile_data.items()
-                if key in user_profile_fields
+                if key in user_profile_fields and value is not None
             }
+
+            print(f"📝 Filtered profile data: {filtered_profile_data}")
 
             # Mark onboarding as completed
             filtered_profile_data["onboarding_completed"] = True
             filtered_profile_data["updated_at"] = datetime.utcnow().isoformat()
 
+            print(f"✅ Setting onboarding_completed = True")
+
             # Update user profile with filtered data
-            success = await self.update_user_profile(user_id, filtered_profile_data)
+            success = await self.update_user_profile(validated_user_id, filtered_profile_data)
+            print(f"💾 Profile update success: {success}")
 
             if success:
                 # Update onboarding progress to completed
-                await self.update_onboarding_progress(user_id, OnboardingStep.COMPLETED, profile_data)
-                logger.info(f"Onboarding completed successfully for user_id: {user_id}")
+                progress_success = await self.update_onboarding_progress(
+                    validated_user_id, 
+                    OnboardingStep.COMPLETED, 
+                    profile_data
+                )
+                print(f"📈 Progress update success: {progress_success}")
+                
+                logger.info(f"Onboarding completed successfully for user_id: {validated_user_id}")
+                
+                # Verify the update by checking the profile
+                try:
+                    updated_profile = await self.get_user_profile(validated_user_id)
+                    if updated_profile:
+                        print(f"✅ Verification: onboarding_completed = {updated_profile.onboarding_completed}")
+                        if not updated_profile.onboarding_completed:
+                            print(f"⚠️ WARNING: Profile shows onboarding_completed = False after update!")
+                            # Try one more time with a direct update
+                            direct_success = await self._force_onboarding_completion(validated_user_id)
+                            print(f"🔧 Force completion attempt: {direct_success}")
+                    else:
+                        print(f"⚠️ Could not retrieve profile for verification")
+                except Exception as verify_error:
+                    print(f"⚠️ Error during verification: {verify_error}")
+            else:
+                print(f"❌ Profile update failed!")
+                logger.error(f"Failed to update user profile during onboarding completion for user_id: {validated_user_id}")
 
             return success
         
         except Exception as e:
             logger.error(f"Error completing onboarding for {user_id}: {e}")
+            print(f"❌ Exception in complete_onboarding: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def _force_onboarding_completion(self, user_id: str) -> bool:
+        """Force onboarding completion with a direct database update"""
+        try:
+            logger.info(f"Force completing onboarding for user_id: {user_id}")
+            print(f"🔧 Force completing onboarding for user: {user_id}")
+            
+            # Direct update with minimal data
+            response = self.client.table("user_profiles").update({
+                "onboarding_completed": True,
+                "updated_at": datetime.utcnow().isoformat()
+            }).eq("user_id", user_id).execute()
+            
+            success = len(response.data) > 0
+            print(f"🔧 Force completion result: {success}")
+            
+            if success:
+                logger.info(f"Force onboarding completion successful for user_id: {user_id}")
+            else:
+                logger.error(f"Force onboarding completion failed for user_id: {user_id}")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"Error in force onboarding completion for {user_id}: {e}")
+            print(f"❌ Error in force completion: {e}")
             return False
     
     # ==================== ONBOARDING OPERATIONS - FIXED ====================
