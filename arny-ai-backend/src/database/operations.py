@@ -1,14 +1,12 @@
 """
-Database operations for Arny AI - ENHANCED VERSION WITH ONBOARDING FIXES
+Database operations for Arny AI - FIXED VERSION WITH ENHANCED PROFILE PROTECTION
 
-Enhanced Features:
-1. Robust UUID validation across all methods
-2. Better error handling for UUID validation
-3. Improved progress loading and saving with better JSON handling
-4. FIXED: Enhanced onboarding completion with verification and force completion
-5. Better session_id handling in conversation methods
-6. FIXED: Proper data type handling for onboarding completion
-7. FIXED: Improved transaction logic for profile updates
+FIXED Issues:
+1. Enhanced profile protection during onboarding completion
+2. More robust error handling to prevent profile loss
+3. Better transaction handling for profile updates
+4. Improved data validation with fallback mechanisms
+5. Enhanced logging for debugging profile issues
 """
 
 from typing import Optional, Dict, Any, List, Union, Tuple
@@ -33,11 +31,7 @@ logger = logging.getLogger(__name__)
 
 class DatabaseOperations:
     """
-    Database operations using Supabase - ENHANCED VERSION WITH ONBOARDING FIXES
-    
-    This class provides all database operations for the Arny AI application.
-    It uses Supabase as the backend and handles all CRUD operations with
-    proper error handling and data validation.
+    Database operations using Supabase - FIXED VERSION WITH ENHANCED PROFILE PROTECTION
     """
     
     def __init__(self):
@@ -55,13 +49,6 @@ class DatabaseOperations:
     def _validate_and_format_uuid(self, user_id: str, field_name: str = "UUID") -> tuple[bool, str]:
         """
         Enhanced UUID validation and formatting across all methods with better error messages
-        
-        Args:
-            user_id: User ID to validate
-            field_name: Name of the field being validated (for better error messages)
-            
-        Returns:
-            Tuple of (is_valid, cleaned_user_id or error_message)
         """
         if not user_id:
             error_msg = f"{field_name} cannot be empty"
@@ -119,7 +106,7 @@ class DatabaseOperations:
             
         except Exception as e:
             logger.error(f"Error getting user profile for {user_id}: {e}")
-            return None  # Return None instead of raising exception for better error handling
+            return None
     
     async def create_user_profile(self, profile: UserProfile) -> bool:
         """
@@ -168,11 +155,11 @@ class DatabaseOperations:
             
         except Exception as e:
             logger.error(f"Error creating user profile for {profile.user_id}: {e}")
-            return False  # Return False instead of raising exception
+            return False
     
     async def update_user_profile(self, user_id: str, updates: Dict[str, Any]) -> bool:
         """
-        Update user profile - ENHANCED VERSION WITH BETTER DATA HANDLING
+        FIXED: Update user profile with enhanced safety and error handling
         """
         try:
             # Use consistent UUID validation
@@ -184,88 +171,208 @@ class DatabaseOperations:
             logger.info(f"Updating user profile for user_id: {validated_user_id}")
             logger.info(f"Update data keys: {list(updates.keys())}")
             
-            # FIXED: Check if profile exists before updating
-            existing_profile = await self.get_user_profile(validated_user_id)
-            if not existing_profile:
+            # FIXED: ENHANCED SAFETY - Get original profile first and backup
+            original_profile = await self.get_user_profile(validated_user_id)
+            if not original_profile:
                 logger.error(f"Cannot update: No user profile found for user_id: {validated_user_id}")
                 return False
             
-            # FIXED: Clean and validate update data
+            # FIXED: Create backup of original profile
+            original_profile_dict = original_profile.dict()
+            logger.info(f"✅ Original profile backed up for user_id: {validated_user_id}")
+            
+            # FIXED: Enhanced data validation with better error handling
             cleaned_updates = {}
+            validation_errors = []
             
             # Add updated_at timestamp
             cleaned_updates["updated_at"] = datetime.utcnow().isoformat()
             
-            # Handle each field carefully
+            # FIXED: Handle each field with enhanced safety
             for key, value in updates.items():
-                if value is None:
-                    continue  # Skip None values
-                
-                if key == "birthdate":
-                    if isinstance(value, str):
-                        # Try to parse and reformat date string
-                        try:
-                            if value and value != "":
-                                # Try different date formats
-                                for date_fmt in ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"]:
-                                    try:
-                                        parsed_date = datetime.strptime(value, date_fmt).date()
-                                        cleaned_updates[key] = parsed_date.isoformat()
-                                        break
-                                    except ValueError:
-                                        continue
-                                else:
-                                    # If no format worked, store as-is if it looks like YYYY-MM-DD
-                                    if len(value) == 10 and value.count('-') == 2:
-                                        cleaned_updates[key] = value
-                        except Exception as e:
-                            logger.warning(f"Could not parse birthdate '{value}': {e}")
-                    elif isinstance(value, date):
-                        cleaned_updates[key] = value.isoformat()
-                
-                elif key == "holiday_preferences":
-                    if isinstance(value, list):
-                        cleaned_updates[key] = json.dumps(value)
-                    elif isinstance(value, str):
-                        # Check if it's already JSON
-                        try:
-                            json.loads(value)  # Test if it's valid JSON
-                            cleaned_updates[key] = value
-                        except json.JSONDecodeError:
-                            # If not JSON, treat as single preference
-                            cleaned_updates[key] = json.dumps([value])
-                
-                else:
-                    # For all other fields, store as-is after converting to string if needed
-                    if isinstance(value, (str, int, float, bool)):
-                        cleaned_updates[key] = value
+                try:
+                    if value is None or value == "":
+                        continue  # Skip None/empty values
+                    
+                    if key == "birthdate":
+                        cleaned_value = self._safely_parse_birthdate(value)
+                        if cleaned_value:
+                            cleaned_updates[key] = cleaned_value
+                    
+                    elif key == "holiday_preferences":
+                        cleaned_value = self._safely_parse_holiday_preferences(value)
+                        if cleaned_value:
+                            cleaned_updates[key] = cleaned_value
+                    
+                    elif key in ["name", "email", "gender", "city", "employer", "working_schedule", 
+                               "holiday_frequency", "annual_income", "monthly_spending", "travel_style", "group_code"]:
+                        # Safe string fields
+                        if isinstance(value, (str, int, float, bool)):
+                            cleaned_updates[key] = str(value).strip() if isinstance(value, str) else value
+                        else:
+                            validation_errors.append(f"Invalid type for {key}: {type(value)}")
+                    
+                    elif key == "onboarding_completed":
+                        # Ensure boolean
+                        cleaned_updates[key] = bool(value)
+                    
+                    elif key == "is_active":
+                        # Ensure boolean
+                        cleaned_updates[key] = bool(value)
+                    
                     else:
-                        cleaned_updates[key] = str(value)
+                        # For other fields, be cautious
+                        if isinstance(value, (str, int, float, bool)):
+                            cleaned_updates[key] = value
+                        else:
+                            validation_errors.append(f"Unsupported field or type for {key}: {type(value)}")
+                            
+                except Exception as field_error:
+                    validation_errors.append(f"Error processing field {key}: {str(field_error)}")
+                    logger.warning(f"Error processing field {key}: {field_error}")
+            
+            # FIXED: Check for validation errors
+            if validation_errors:
+                logger.warning(f"Data validation errors for user {validated_user_id}: {validation_errors}")
+                # Continue with valid fields only, don't fail the entire update
+            
+            if not cleaned_updates or len(cleaned_updates) <= 1:  # Only updated_at
+                logger.warning(f"No valid updates after cleaning for user_id: {validated_user_id}")
+                return True  # Consider it successful if no changes needed
             
             logger.info(f"Cleaned update data: {cleaned_updates}")
             
-            response = self.client.table("user_profiles").update(cleaned_updates).eq("user_id", validated_user_id).execute()
-            
-            success = len(response.data) > 0
-            if success:
-                logger.info(f"User profile updated successfully for user_id: {validated_user_id}")
-                # FIXED: Verify the update worked
-                updated_profile = await self.get_user_profile(validated_user_id)
-                if updated_profile:
-                    logger.info(f"Update verification successful for user_id: {validated_user_id}")
+            # FIXED: ENHANCED SAFETY - Perform update with error recovery
+            try:
+                response = self.client.table("user_profiles").update(cleaned_updates).eq("user_id", validated_user_id).execute()
+                
+                success = len(response.data) > 0
+                
+                if success:
+                    logger.info(f"User profile updated successfully for user_id: {validated_user_id}")
+                    
+                    # FIXED: ENHANCED VERIFICATION - Verify the update worked
+                    await asyncio.sleep(0.1)  # Small delay for consistency
+                    verification_profile = await self.get_user_profile(validated_user_id)
+                    
+                    if verification_profile:
+                        logger.info(f"✅ Update verification successful for user_id: {validated_user_id}")
+                        return True
+                    else:
+                        logger.error(f"❌ Update verification failed - profile disappeared for user_id: {validated_user_id}")
+                        # EMERGENCY RECOVERY: Restore original profile
+                        await self._emergency_restore_profile(validated_user_id, original_profile_dict)
+                        return False
                 else:
-                    logger.error(f"Update verification failed for user_id: {validated_user_id}")
+                    logger.warning(f"No rows updated for user_id: {validated_user_id}")
                     return False
-            else:
-                logger.warning(f"No rows updated for user_id: {validated_user_id}")
-            
-            return success
+                    
+            except Exception as update_error:
+                logger.error(f"Database update error for user_id {validated_user_id}: {update_error}")
+                # EMERGENCY RECOVERY: Ensure profile still exists
+                current_profile = await self.get_user_profile(validated_user_id)
+                if not current_profile:
+                    logger.error(f"CRITICAL: Profile lost during update, attempting emergency restoration for user_id: {validated_user_id}")
+                    await self._emergency_restore_profile(validated_user_id, original_profile_dict)
+                return False
             
         except Exception as e:
             logger.error(f"Error updating user profile for {user_id}: {e}")
             import traceback
             traceback.print_exc()
-            return False  # Return False instead of raising exception
+            return False
+    
+    def _safely_parse_birthdate(self, value) -> Optional[str]:
+        """FIXED: Safely parse birthdate with multiple format support"""
+        try:
+            if isinstance(value, str) and value.strip():
+                value = value.strip()
+                # Try different date formats
+                for date_fmt in ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y%m%d"]:
+                    try:
+                        parsed_date = datetime.strptime(value, date_fmt).date()
+                        return parsed_date.isoformat()
+                    except ValueError:
+                        continue
+                
+                # If no format worked, check if it's already in YYYY-MM-DD format
+                if len(value) == 10 and value.count('-') == 2:
+                    try:
+                        # Validate it's a real date
+                        datetime.strptime(value, "%Y-%m-%d")
+                        return value
+                    except ValueError:
+                        pass
+                        
+            elif isinstance(value, date):
+                return value.isoformat()
+                
+        except Exception as e:
+            logger.warning(f"Could not parse birthdate '{value}': {e}")
+        
+        return None
+    
+    def _safely_parse_holiday_preferences(self, value) -> Optional[str]:
+        """FIXED: Safely parse holiday preferences"""
+        try:
+            if isinstance(value, list):
+                return json.dumps(value)
+            elif isinstance(value, str) and value.strip():
+                value = value.strip()
+                # Check if it's already JSON
+                try:
+                    json.loads(value)  # Test if it's valid JSON
+                    return value
+                except json.JSONDecodeError:
+                    # If not JSON, treat as comma-separated or single preference
+                    if "," in value:
+                        preferences = [p.strip() for p in value.split(",") if p.strip()]
+                    else:
+                        preferences = [value]
+                    return json.dumps(preferences)
+        except Exception as e:
+            logger.warning(f"Could not parse holiday_preferences '{value}': {e}")
+        
+        return None
+    
+    async def _emergency_restore_profile(self, user_id: str, original_profile_dict: Dict[str, Any]) -> bool:
+        """FIXED: Emergency profile restoration mechanism"""
+        try:
+            logger.error(f"🚨 EMERGENCY: Attempting to restore profile for user_id: {user_id}")
+            
+            # Remove computed fields that shouldn't be in the restore
+            restore_data = original_profile_dict.copy()
+            restore_data["updated_at"] = datetime.utcnow().isoformat()
+            
+            # Convert any datetime objects to strings
+            for key, value in restore_data.items():
+                if isinstance(value, (datetime, date)):
+                    restore_data[key] = value.isoformat()
+            
+            # Try to restore using insert (in case profile was deleted)
+            try:
+                response = self.client.table("user_profiles").insert(restore_data).execute()
+                if len(response.data) > 0:
+                    logger.info(f"✅ EMERGENCY: Profile restored via insert for user_id: {user_id}")
+                    return True
+            except Exception:
+                # Profile might still exist, try update
+                pass
+            
+            # Try to restore using update
+            response = self.client.table("user_profiles").update(restore_data).eq("user_id", user_id).execute()
+            success = len(response.data) > 0
+            
+            if success:
+                logger.info(f"✅ EMERGENCY: Profile restored via update for user_id: {user_id}")
+            else:
+                logger.error(f"❌ EMERGENCY: Profile restoration failed for user_id: {user_id}")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"❌ EMERGENCY: Profile restoration exception for user_id {user_id}: {e}")
+            return False
     
     async def delete_user_profile(self, user_id: str) -> bool:
         """
@@ -287,7 +394,7 @@ class DatabaseOperations:
     
     async def complete_onboarding(self, user_id: str, profile_data: Dict[str, Any]) -> bool:
         """
-        FIXED: Mark onboarding as complete and create/update profile with comprehensive error handling
+        FIXED: Mark onboarding as complete with ENHANCED SAFETY and error recovery
         """
         try:
             # Use consistent UUID validation
@@ -297,8 +404,18 @@ class DatabaseOperations:
                 return False
             
             logger.info(f"Completing onboarding for user_id: {validated_user_id}")
-            print(f"🎉 Starting onboarding completion for user: {validated_user_id}")
+            print(f"🎉 Starting ENHANCED onboarding completion for user: {validated_user_id}")
             print(f"📊 Profile data received: {list(profile_data.keys())}")
+            
+            # FIXED: ENHANCED SAFETY - Get original profile and backup BEFORE any changes
+            original_profile = await self.get_user_profile(validated_user_id)
+            if not original_profile:
+                logger.error(f"Cannot complete onboarding: No user profile found for user_id: {validated_user_id}")
+                print(f"❌ No original profile found, cannot complete onboarding")
+                return False
+            
+            original_profile_dict = original_profile.dict()
+            print(f"✅ Original profile backed up: email={original_profile.email}")
             
             # Filter out fields that don't belong in user_profiles table
             user_profile_fields = {
@@ -319,85 +436,71 @@ class DatabaseOperations:
             # FIXED: Always mark onboarding as completed
             filtered_profile_data["onboarding_completed"] = True
             print(f"✅ Setting onboarding_completed = True")
-
-            # FIXED: Check if user profile exists and decide whether to create or update
-            existing_profile = await self.get_user_profile(validated_user_id)
             
-            if existing_profile:
-                print(f"📄 Existing profile found, updating...")
-                # Update existing profile
+            # FIXED: ENHANCED SAFETY - Ensure we preserve critical original data
+            if not filtered_profile_data.get("email") and original_profile.email:
+                filtered_profile_data["email"] = original_profile.email
+                print(f"🔧 Preserved original email: {original_profile.email}")
+            
+            if not filtered_profile_data.get("user_id"):
+                filtered_profile_data["user_id"] = validated_user_id
+                print(f"🔧 Preserved user_id: {validated_user_id}")
+
+            # FIXED: ENHANCED SAFETY - Update existing profile with multiple safety checks
+            print(f"📄 Updating existing profile with enhanced safety...")
+            
+            try:
+                # FIRST: Verify profile still exists
+                pre_update_check = await self.get_user_profile(validated_user_id)
+                if not pre_update_check:
+                    logger.error(f"Profile disappeared before update for user_id: {validated_user_id}")
+                    print(f"❌ Profile disappeared before update")
+                    # EMERGENCY: Restore original profile
+                    await self._emergency_restore_profile(validated_user_id, original_profile_dict)
+                    return False
+                
+                # SECOND: Perform the update
                 success = await self.update_user_profile(validated_user_id, filtered_profile_data)
                 print(f"💾 Profile update success: {success}")
-            else:
-                print(f"📄 No existing profile found, creating new one...")
-                # Create new profile from collected data
-                try:
-                    from .models import UserProfile
-                    
-                    # Ensure we have an email
-                    if not filtered_profile_data.get("email"):
-                        logger.error(f"Cannot create profile: email is required but missing")
-                        print(f"❌ No email found in profile data")
-                        return False
-                    
-                    # Create comprehensive profile from onboarding data
-                    new_profile = UserProfile(
-                        user_id=validated_user_id,
-                        email=filtered_profile_data["email"],
-                        name=filtered_profile_data.get("name"),
-                        gender=filtered_profile_data.get("gender"),
-                        birthdate=filtered_profile_data.get("birthdate"),
-                        city=filtered_profile_data.get("city"),
-                        employer=filtered_profile_data.get("employer"),
-                        working_schedule=filtered_profile_data.get("working_schedule"),
-                        holiday_frequency=filtered_profile_data.get("holiday_frequency"),
-                        annual_income=filtered_profile_data.get("annual_income"),
-                        monthly_spending=filtered_profile_data.get("monthly_spending"),
-                        holiday_preferences=filtered_profile_data.get("holiday_preferences", "").split(",") if filtered_profile_data.get("holiday_preferences") else [],
-                        travel_style=filtered_profile_data.get("travel_style"),
-                        group_code=filtered_profile_data.get("group_code"),
-                        onboarding_completed=True,  # Mark as completed
-                        is_active=True
-                    )
-                    
-                    success = await self.create_user_profile(new_profile)
-                    print(f"💾 Profile creation success: {success}")
-                    
-                except Exception as profile_creation_error:
-                    logger.error(f"Error creating profile from onboarding data: {profile_creation_error}")
-                    print(f"❌ Profile creation error: {profile_creation_error}")
-                    return False
-
-            if success:
-                # Update onboarding progress to completed
-                try:
-                    progress_success = await self.update_onboarding_progress(
-                        validated_user_id, 
-                        OnboardingStep.COMPLETED, 
-                        profile_data
-                    )
-                    print(f"📈 Progress update success: {progress_success}")
-                except Exception as progress_error:
-                    logger.warning(f"Failed to update onboarding progress: {progress_error}")
-                    # Don't fail the entire process if progress update fails
                 
-                # FIXED: Triple verification with multiple attempts
-                verification_attempts = 3
+                if not success:
+                    logger.error(f"Profile update failed for user_id: {validated_user_id}")
+                    print(f"❌ Profile update failed")
+                    return False
+                
+                # THIRD: ENHANCED VERIFICATION with multiple attempts and recovery
+                verification_attempts = 5  # Increased attempts
                 final_verification_passed = False
                 
                 for attempt in range(verification_attempts):
                     try:
-                        await asyncio.sleep(0.2)  # Small delay for database consistency
+                        await asyncio.sleep(0.2 * (attempt + 1))  # Progressive delay
                         verification_profile = await self.get_user_profile(validated_user_id)
                         
                         if verification_profile:
                             is_completed = verification_profile.onboarding_completed
-                            print(f"🔍 Verification attempt {attempt + 1}: profile exists, onboarding_completed = {is_completed}")
+                            email_preserved = verification_profile.email == original_profile.email
                             
-                            if is_completed:
+                            print(f"🔍 Verification attempt {attempt + 1}: profile exists, onboarding_completed = {is_completed}, email_preserved = {email_preserved}")
+                            
+                            if is_completed and email_preserved:
                                 print(f"✅ Onboarding completion verified successfully!")
                                 final_verification_passed = True
                                 break
+                            elif not email_preserved:
+                                logger.error(f"Email was corrupted during update for user_id: {validated_user_id}")
+                                print(f"❌ Email was corrupted, attempting emergency restoration")
+                                # EMERGENCY: Restore original profile
+                                restore_success = await self._emergency_restore_profile(validated_user_id, original_profile_dict)
+                                if restore_success:
+                                    # Try to complete onboarding again with minimal data
+                                    minimal_update = {"onboarding_completed": True}
+                                    final_success = await self.update_user_profile(validated_user_id, minimal_update)
+                                    if final_success:
+                                        print(f"🔧 Emergency restoration and minimal completion successful")
+                                        final_verification_passed = True
+                                        break
+                                return False
                             else:
                                 print(f"⚠️ Profile exists but onboarding_completed = False, trying force completion...")
                                 force_success = await self._force_onboarding_completion(validated_user_id)
@@ -407,24 +510,49 @@ class DatabaseOperations:
                                     break
                         else:
                             print(f"⚠️ Verification attempt {attempt + 1}: No profile found")
+                            # EMERGENCY: Restore original profile with onboarding completed
+                            logger.error(f"Profile disappeared during verification for user_id: {validated_user_id}")
+                            original_profile_dict["onboarding_completed"] = True
+                            restore_success = await self._emergency_restore_profile(validated_user_id, original_profile_dict)
+                            if restore_success:
+                                print(f"🔧 Emergency restoration successful on attempt {attempt + 1}")
+                                final_verification_passed = True
+                                break
                             
                     except Exception as verify_error:
                         print(f"⚠️ Verification attempt {attempt + 1} error: {verify_error}")
                         continue
                 
                 if final_verification_passed:
+                    # Update onboarding progress to completed
+                    try:
+                        progress_success = await self.update_onboarding_progress(
+                            validated_user_id, 
+                            OnboardingStep.COMPLETED, 
+                            profile_data
+                        )
+                        print(f"📈 Progress update success: {progress_success}")
+                    except Exception as progress_error:
+                        logger.warning(f"Failed to update onboarding progress: {progress_error}")
+                        # Don't fail the entire process if progress update fails
+                    
                     logger.info(f"Onboarding completed successfully for user_id: {validated_user_id}")
                     return True
                 else:
                     logger.error(f"Onboarding completion verification failed after {verification_attempts} attempts")
                     print(f"❌ Final verification failed after {verification_attempts} attempts")
-                    # Try one final force completion
-                    final_force = await self._force_onboarding_completion(validated_user_id)
-                    print(f"🔧 Final force completion attempt: {final_force}")
-                    return final_force
-            else:
-                print(f"❌ Profile creation/update failed!")
-                logger.error(f"Failed to create/update user profile during onboarding completion for user_id: {validated_user_id}")
+                    return False
+                    
+            except Exception as update_error:
+                logger.error(f"Error during profile update in onboarding completion: {update_error}")
+                print(f"❌ Exception during profile update: {update_error}")
+                
+                # EMERGENCY: Ensure profile still exists and restore if necessary
+                emergency_check = await self.get_user_profile(validated_user_id)
+                if not emergency_check:
+                    logger.error(f"CRITICAL: Profile lost during onboarding completion, restoring for user_id: {validated_user_id}")
+                    await self._emergency_restore_profile(validated_user_id, original_profile_dict)
+                
                 return False
 
         except Exception as e:
@@ -435,7 +563,7 @@ class DatabaseOperations:
             return False
     
     async def _force_onboarding_completion(self, user_id: str) -> bool:
-        """FIXED: Force onboarding completion with a direct database update and better verification"""
+        """FIXED: Force onboarding completion with enhanced safety"""
         try:
             # Validate user_id first
             is_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
@@ -463,26 +591,15 @@ class DatabaseOperations:
             
             if success:
                 logger.info(f"Force onboarding completion successful for user_id: {validated_user_id}")
-                # Double-check the result with multiple verification attempts
-                for attempt in range(3):
-                    try:
-                        await asyncio.sleep(0.1)  # Small delay to ensure consistency
-                        verification_profile = await self.get_user_profile(validated_user_id)
-                        if verification_profile:
-                            final_status = verification_profile.onboarding_completed
-                            print(f"🔍 Force completion verification attempt {attempt + 1}: onboarding_completed = {final_status}")
-                            if final_status:
-                                print(f"✅ Force completion verified successfully")
-                                return True
-                        else:
-                            print(f"⚠️ Could not retrieve profile for force completion verification attempt {attempt + 1}")
-                    except Exception as verify_error:
-                        print(f"⚠️ Force completion verification attempt {attempt + 1} error: {verify_error}")
-                        continue
-                
-                # If we get here, verification failed but database update succeeded
-                print(f"⚠️ Force completion database update succeeded but verification failed")
-                return True  # Return True since database update worked
+                # Verify the result
+                await asyncio.sleep(0.2)
+                verification_profile = await self.get_user_profile(validated_user_id)
+                if verification_profile and verification_profile.onboarding_completed:
+                    print(f"✅ Force completion verified successfully")
+                    return True
+                else:
+                    print(f"⚠️ Force completion verification failed")
+                    return False
             else:
                 logger.error(f"Force onboarding completion failed for user_id: {validated_user_id}")
                 print(f"❌ Force completion database update failed")
@@ -543,7 +660,7 @@ class DatabaseOperations:
             
         except Exception as e:
             logger.error(f"Error getting onboarding progress for {user_id}: {e}")
-            return None  # Return None instead of raising exception
+            return None
     
     async def update_onboarding_progress(self, user_id: str, step: OnboardingStep, data: Dict[str, Any]) -> bool:
         """
@@ -559,11 +676,10 @@ class DatabaseOperations:
             logger.info(f"Updating onboarding progress for user_id: {validated_user_id}, step: {step.value}")
             
             # ENHANCED: Ensure data is properly formatted for JSON storage
-            # The data should already be in the correct format from the agent
             collected_data_json = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
             
             progress_data = {
-                "user_id": validated_user_id,  # Use validated user_id
+                "user_id": validated_user_id,
                 "current_step": step.value,
                 "collected_data": collected_data_json,
                 "updated_at": datetime.utcnow().isoformat()
@@ -587,7 +703,7 @@ class DatabaseOperations:
             
         except Exception as e:
             logger.error(f"Error updating onboarding progress for {user_id}: {e}")
-            return False  # Return False instead of raising exception
+            return False
     
     # ==================== GROUP OPERATIONS - ENHANCED ====================
     
@@ -607,7 +723,7 @@ class DatabaseOperations:
             
         except Exception as e:
             logger.error(f"Error getting group members for {group_code}: {e}")
-            return []  # Return empty list instead of raising exception
+            return []
     
     async def add_group_member(self, group_code: str, user_id: str, role: str = "member") -> bool:
         """
@@ -625,7 +741,7 @@ class DatabaseOperations:
             member_data = {
                 "id": str(uuid.uuid4()),
                 "group_code": group_code.upper(),
-                "user_id": validated_user_id,  # Use validated user_id
+                "user_id": validated_user_id,
                 "role": role,
                 "joined_at": datetime.utcnow().isoformat(),
                 "is_active": True,
@@ -739,7 +855,7 @@ class DatabaseOperations:
             
         except Exception as e:
             logger.error(f"Error getting user groups for {user_id}: {e}")
-            return []  # Return empty list instead of raising exception
+            return []
     
     # ==================== USER STATUS CHECK - ENHANCED ====================
     
@@ -783,7 +899,7 @@ class DatabaseOperations:
             
         except Exception as e:
             logger.error(f"Error getting user status for {user_id}: {e}")
-            return None  # Return None instead of raising exception
+            return None
     
     # ==================== CHAT OPERATIONS - ENHANCED ====================
     
@@ -875,7 +991,7 @@ class DatabaseOperations:
             
         except Exception as e:
             logger.error(f"Error getting conversation history for {user_id}: {e}")
-            return []  # Return empty list instead of raising exception
+            return []
     
     async def save_conversation_turn(self, user_id: str, session_id: str, user_message: str, 
                                    assistant_response: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
