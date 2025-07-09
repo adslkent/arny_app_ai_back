@@ -14,6 +14,7 @@ from ..auth.supabase_auth import SupabaseAuth
 class MainHandler:
     """
     Main handler that routes requests to appropriate agents for the main travel conversation flow
+    FIXED VERSION with enhanced user status debugging and error handling
     """
     
     def __init__(self):
@@ -425,14 +426,7 @@ class MainHandler:
     
     async def handle_user_status(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
-        Handle user status requests (check onboarding completion, etc.) - FIXED VERSION
-        
-        Args:
-            event: Lambda event containing user status request
-            context: Lambda context
-            
-        Returns:
-            User status response
+        FIXED: Handle user status requests with ENHANCED debugging and error recovery
         """
         
         try:
@@ -440,36 +434,77 @@ class MainHandler:
             user_id = body.get('user_id')
             access_token = body.get('access_token')
             
+            print(f"🔍 ENHANCED DEBUG: User status request for user_id: {user_id}")
+            
             if not user_id or not access_token:
+                print(f"❌ Missing required fields: user_id={bool(user_id)}, access_token={bool(access_token)}")
                 return self._error_response(400, "Missing user_id or access_token")
             
             # Verify authentication
+            print(f"🔐 Verifying access token...")
             auth_result = await self.auth.verify_token(access_token)
             if not auth_result.get("success"):
+                print(f"❌ Token verification failed: {auth_result.get('error')}")
                 return self._error_response(401, "Invalid or expired token")
             
-            # FIXED: Add more detailed logging for debugging
-            print(f"🔍 Getting user status for user_id: {user_id}")
+            print(f"✅ Token verified successfully")
             
-            # Get user status with enhanced error handling
+            # FIXED: ENHANCED debugging and error recovery for user status
+            print(f"🔍 Getting user status with enhanced debugging...")
+            
             try:
-                user_status = await self.db.get_user_status(user_id)
+                # STEP 1: Direct profile check
+                print(f"📊 STEP 1: Checking user profile directly...")
+                user_profile = await self.db.get_user_profile(user_id)
                 
-                if user_status:
-                    print(f"✅ User status found for user_id: {user_id}")
-                    print(f"📊 Status data: onboarding_completed={user_status.get('onboarding_completed')}")
-                    return self._success_response(user_status)
-                else:
-                    print(f"❌ No user status found for user_id: {user_id}")
+                if user_profile:
+                    print(f"✅ User profile found: email={user_profile.email}, onboarding_completed={user_profile.onboarding_completed}")
                     
-                    # FIXED: Try to diagnose the issue
-                    try:
-                        # Check if user profile exists directly
-                        user_profile = await self.db.get_user_profile(user_id)
-                        if user_profile:
-                            print(f"🔍 User profile exists but get_user_status failed")
-                            # Return basic status from profile
-                            return self._success_response({
+                    # STEP 2: Try get_user_status
+                    print(f"📊 STEP 2: Trying get_user_status...")
+                    user_status = await self.db.get_user_status(user_id)
+                    
+                    if user_status:
+                        print(f"✅ User status retrieved successfully")
+                        print(f"📊 Status details: onboarding_completed={user_status.get('onboarding_completed')}")
+                        return self._success_response(user_status)
+                    else:
+                        print(f"⚠️ get_user_status returned None, but profile exists")
+                        print(f"🔧 Creating status from profile directly...")
+                        
+                        # STEP 3: Manual status creation from profile
+                        try:
+                            # Get onboarding progress
+                            onboarding = await self.db.get_onboarding_progress(user_id)
+                            print(f"📈 Onboarding progress: {onboarding.current_step.value if onboarding else 'None'}")
+                            
+                            # Get user groups
+                            groups = await self.db.get_user_groups(user_id)
+                            print(f"👥 User groups: {len(groups)} groups")
+                            
+                            # Create manual status
+                            manual_status = {
+                                "user_id": user_id,
+                                "email": user_profile.email,
+                                "onboarding_completed": user_profile.onboarding_completed,
+                                "is_active": user_profile.is_active,
+                                "current_step": onboarding.current_step.value if onboarding else "group_code",
+                                "completion_percentage": onboarding.completion_percentage if onboarding else (100.0 if user_profile.onboarding_completed else 0.0),
+                                "groups": groups,
+                                "profile": user_profile.dict()
+                            }
+                            
+                            print(f"✅ Manual status created successfully")
+                            return self._success_response(manual_status)
+                            
+                        except Exception as manual_error:
+                            print(f"❌ Manual status creation failed: {manual_error}")
+                            import traceback
+                            traceback.print_exc()
+                            
+                            # STEP 4: Minimal fallback status
+                            print(f"🔧 Creating minimal fallback status...")
+                            fallback_status = {
                                 "user_id": user_id,
                                 "email": user_profile.email,
                                 "onboarding_completed": user_profile.onboarding_completed,
@@ -478,22 +513,71 @@ class MainHandler:
                                 "completion_percentage": 100.0 if user_profile.onboarding_completed else 0.0,
                                 "groups": [],
                                 "profile": user_profile.dict()
-                            })
-                        else:
-                            print(f"🔍 User profile does not exist for user_id: {user_id}")
-                            return self._error_response(404, "User not found")
-                    except Exception as diagnosis_error:
-                        print(f"❌ Error during diagnosis: {diagnosis_error}")
-                        return self._error_response(404, "User not found")
+                            }
+                            
+                            print(f"✅ Fallback status created")
+                            return self._success_response(fallback_status)
+                else:
+                    print(f"❌ No user profile found for user_id: {user_id}")
+                    
+                    # STEP 5: Check if this is a database issue or missing profile
+                    print(f"🔍 STEP 5: Investigating missing profile...")
+                    
+                    # Check if user exists in auth but not in our database
+                    auth_user = auth_result.get("user")
+                    if auth_user:
+                        print(f"🔍 Auth user exists: {auth_user.get('email')}")
+                        print(f"❌ Profile missing from database - this indicates a signup issue")
+                        
+                        # Try to create missing profile from auth data
+                        try:
+                            print(f"🔧 Attempting to create missing profile from auth data...")
+                            from ..database.models import UserProfile
+                            
+                            missing_profile = UserProfile(
+                                user_id=user_id,
+                                email=auth_user.get("email"),
+                                onboarding_completed=False,
+                                is_active=True
+                            )
+                            
+                            profile_created = await self.db.create_user_profile(missing_profile)
+                            
+                            if profile_created:
+                                print(f"✅ Missing profile created successfully")
+                                
+                                # Return basic status for newly created profile
+                                recovery_status = {
+                                    "user_id": user_id,
+                                    "email": auth_user.get("email"),
+                                    "onboarding_completed": False,
+                                    "is_active": True,
+                                    "current_step": "group_code",
+                                    "completion_percentage": 0.0,
+                                    "groups": [],
+                                    "profile": missing_profile.dict()
+                                }
+                                
+                                print(f"✅ Recovery status created")
+                                return self._success_response(recovery_status)
+                            else:
+                                print(f"❌ Failed to create missing profile")
+                                
+                        except Exception as recovery_error:
+                            print(f"❌ Profile recovery failed: {recovery_error}")
+                            import traceback
+                            traceback.print_exc()
+                    
+                    return self._error_response(404, "User not found")
                     
             except Exception as status_error:
-                print(f"❌ Error getting user status: {status_error}")
+                print(f"❌ Error during user status retrieval: {status_error}")
                 import traceback
                 traceback.print_exc()
                 return self._error_response(500, f"Error retrieving user status: {str(status_error)}")
                 
         except Exception as e:
-            print(f"Error in user status handler: {str(e)}")
+            print(f"❌ Error in user status handler: {str(e)}")
             import traceback
             traceback.print_exc()
             return self._error_response(500, "Internal server error")
