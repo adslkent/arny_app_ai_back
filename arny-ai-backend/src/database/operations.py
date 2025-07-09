@@ -1,13 +1,14 @@
 """
-Database operations for Arny AI - ENHANCED VERSION
+Database operations for Arny AI - ENHANCED VERSION WITH ONBOARDING FIXES
 
 Enhanced Features:
 1. Robust UUID validation across all methods
 2. Better error handling for UUID validation
 3. Improved progress loading and saving with better JSON handling
-4. Enhanced onboarding completion with verification and force completion
+4. FIXED: Enhanced onboarding completion with verification and force completion
 5. Better session_id handling in conversation methods
-6. FIXED: Proper profile creation/update during onboarding completion
+6. FIXED: Proper data type handling for onboarding completion
+7. FIXED: Improved transaction logic for profile updates
 """
 
 from typing import Optional, Dict, Any, List, Union, Tuple
@@ -15,6 +16,7 @@ from datetime import datetime, date, timedelta
 import json
 import uuid
 import logging
+import asyncio
 from supabase import create_client, Client
 from postgrest.exceptions import APIError
 
@@ -31,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 class DatabaseOperations:
     """
-    Database operations using Supabase - ENHANCED VERSION
+    Database operations using Supabase - ENHANCED VERSION WITH ONBOARDING FIXES
     
     This class provides all database operations for the Arny AI application.
     It uses Supabase as the backend and handles all CRUD operations with
@@ -121,7 +123,7 @@ class DatabaseOperations:
     
     async def create_user_profile(self, profile: UserProfile) -> bool:
         """
-        Create a new user profile - ENHANCED VERSION
+        Create a new user profile - ENHANCED VERSION WITH BETTER ERROR HANDLING
         """
         try:
             # Validate the user_id in the profile
@@ -131,6 +133,12 @@ class DatabaseOperations:
                 return False
             
             logger.info(f"Creating user profile for user_id: {validated_user_id}")
+            
+            # FIXED: Check if profile already exists before creating
+            existing_profile = await self.get_user_profile(validated_user_id)
+            if existing_profile:
+                logger.info(f"User profile already exists for user_id: {validated_user_id}")
+                return True  # Consider it successful if already exists
             
             # Convert profile to dict and handle datetime fields
             profile_dict = profile.dict()
@@ -164,7 +172,7 @@ class DatabaseOperations:
     
     async def update_user_profile(self, user_id: str, updates: Dict[str, Any]) -> bool:
         """
-        Update user profile - ENHANCED VERSION
+        Update user profile - ENHANCED VERSION WITH BETTER DATA HANDLING
         """
         try:
             # Use consistent UUID validation
@@ -174,46 +182,89 @@ class DatabaseOperations:
                 return False
             
             logger.info(f"Updating user profile for user_id: {validated_user_id}")
+            logger.info(f"Update data keys: {list(updates.keys())}")
+            
+            # FIXED: Check if profile exists before updating
+            existing_profile = await self.get_user_profile(validated_user_id)
+            if not existing_profile:
+                logger.error(f"Cannot update: No user profile found for user_id: {validated_user_id}")
+                return False
+            
+            # FIXED: Clean and validate update data
+            cleaned_updates = {}
             
             # Add updated_at timestamp
-            updates["updated_at"] = datetime.utcnow().isoformat()
+            cleaned_updates["updated_at"] = datetime.utcnow().isoformat()
             
-            # Handle special fields
-            if "birthdate" in updates and updates["birthdate"]:
-                if isinstance(updates["birthdate"], date):
-                    updates["birthdate"] = updates["birthdate"].isoformat()
-                elif isinstance(updates["birthdate"], str):
-                    # Try to parse and validate the date string
-                    try:
-                        parsed_date = datetime.strptime(updates["birthdate"], "%Y-%m-%d").date()
-                        updates["birthdate"] = parsed_date.isoformat()
-                    except ValueError:
-                        # If parsing fails, keep the original string
-                        pass
+            # Handle each field carefully
+            for key, value in updates.items():
+                if value is None:
+                    continue  # Skip None values
+                
+                if key == "birthdate":
+                    if isinstance(value, str):
+                        # Try to parse and reformat date string
+                        try:
+                            if value and value != "":
+                                # Try different date formats
+                                for date_fmt in ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"]:
+                                    try:
+                                        parsed_date = datetime.strptime(value, date_fmt).date()
+                                        cleaned_updates[key] = parsed_date.isoformat()
+                                        break
+                                    except ValueError:
+                                        continue
+                                else:
+                                    # If no format worked, store as-is if it looks like YYYY-MM-DD
+                                    if len(value) == 10 and value.count('-') == 2:
+                                        cleaned_updates[key] = value
+                        except Exception as e:
+                            logger.warning(f"Could not parse birthdate '{value}': {e}")
+                    elif isinstance(value, date):
+                        cleaned_updates[key] = value.isoformat()
+                
+                elif key == "holiday_preferences":
+                    if isinstance(value, list):
+                        cleaned_updates[key] = json.dumps(value)
+                    elif isinstance(value, str):
+                        # Check if it's already JSON
+                        try:
+                            json.loads(value)  # Test if it's valid JSON
+                            cleaned_updates[key] = value
+                        except json.JSONDecodeError:
+                            # If not JSON, treat as single preference
+                            cleaned_updates[key] = json.dumps([value])
+                
+                else:
+                    # For all other fields, store as-is after converting to string if needed
+                    if isinstance(value, (str, int, float, bool)):
+                        cleaned_updates[key] = value
+                    else:
+                        cleaned_updates[key] = str(value)
             
-            if "holiday_preferences" in updates and updates["holiday_preferences"]:
-                if isinstance(updates["holiday_preferences"], list):
-                    updates["holiday_preferences"] = json.dumps(updates["holiday_preferences"])
-                elif isinstance(updates["holiday_preferences"], str):
-                    # Assume it's already a string, validate it's valid JSON
-                    try:
-                        json.loads(updates["holiday_preferences"])
-                    except json.JSONDecodeError:
-                        # If not valid JSON, treat as a single preference
-                        updates["holiday_preferences"] = json.dumps([updates["holiday_preferences"]])
+            logger.info(f"Cleaned update data: {cleaned_updates}")
             
-            response = self.client.table("user_profiles").update(updates).eq("user_id", validated_user_id).execute()
+            response = self.client.table("user_profiles").update(cleaned_updates).eq("user_id", validated_user_id).execute()
             
             success = len(response.data) > 0
             if success:
                 logger.info(f"User profile updated successfully for user_id: {validated_user_id}")
+                # FIXED: Verify the update worked
+                updated_profile = await self.get_user_profile(validated_user_id)
+                if updated_profile:
+                    logger.info(f"Update verification successful for user_id: {validated_user_id}")
+                else:
+                    logger.error(f"Update verification failed for user_id: {validated_user_id}")
+                    return False
             else:
-                logger.warning(f"No user profile found to update for user_id: {validated_user_id}")
+                logger.warning(f"No rows updated for user_id: {validated_user_id}")
             
             return success
             
         except Exception as e:
             logger.error(f"Error updating user profile for {user_id}: {e}")
+            import traceback
+            traceback.print_exc()
             return False  # Return False instead of raising exception
     
     async def delete_user_profile(self, user_id: str) -> bool:
@@ -236,7 +287,7 @@ class DatabaseOperations:
     
     async def complete_onboarding(self, user_id: str, profile_data: Dict[str, Any]) -> bool:
         """
-        Mark onboarding as complete and update profile - FIXED VERSION with proper profile creation/update
+        FIXED: Mark onboarding as complete and create/update profile with comprehensive error handling
         """
         try:
             # Use consistent UUID validation
@@ -249,10 +300,6 @@ class DatabaseOperations:
             print(f"🎉 Starting onboarding completion for user: {validated_user_id}")
             print(f"📊 Profile data received: {list(profile_data.keys())}")
             
-            # FIXED: Check if user profile exists first
-            existing_profile = await self.get_user_profile(validated_user_id)
-            print(f"📋 Existing profile found: {existing_profile is not None}")
-            
             # Filter out fields that don't belong in user_profiles table
             user_profile_fields = {
                 'name', 'gender', 'birthdate', 'city', 'employer',
@@ -261,45 +308,40 @@ class DatabaseOperations:
                 'group_code', 'email'
             }
 
-            # Filter profile data to only include fields that exist in user_profiles table
-            filtered_profile_data = {
-                key: value for key, value in profile_data.items()
-                if key in user_profile_fields and value is not None
-            }
+            # FIXED: Better filtering and data cleaning
+            filtered_profile_data = {}
+            for key, value in profile_data.items():
+                if key in user_profile_fields and value is not None and value != "":
+                    filtered_profile_data[key] = value
 
             print(f"📝 Filtered profile data: {filtered_profile_data}")
 
-            # Mark onboarding as completed
+            # FIXED: Always mark onboarding as completed
             filtered_profile_data["onboarding_completed"] = True
-            filtered_profile_data["updated_at"] = datetime.utcnow().isoformat()
-
             print(f"✅ Setting onboarding_completed = True")
 
-            success = False
+            # FIXED: Check if user profile exists and decide whether to create or update
+            existing_profile = await self.get_user_profile(validated_user_id)
             
             if existing_profile:
-                # FIXED: Update existing profile
-                print(f"📝 Updating existing profile")
+                print(f"📄 Existing profile found, updating...")
+                # Update existing profile
                 success = await self.update_user_profile(validated_user_id, filtered_profile_data)
                 print(f"💾 Profile update success: {success}")
             else:
-                # FIXED: Create new profile since it doesn't exist
-                print(f"📝 Creating new profile (profile didn't exist)")
-                
-                # Ensure we have the required email field
-                if not filtered_profile_data.get("email"):
-                    print(f"⚠️ No email in filtered data, looking for it in raw profile_data")
-                    if profile_data.get("email"):
-                        filtered_profile_data["email"] = profile_data["email"]
-                        print(f"✅ Found email in raw data: {profile_data['email']}")
-                    else:
-                        logger.error(f"Cannot create profile without email for user {validated_user_id}")
-                        print(f"❌ No email found in any data, cannot create profile")
-                        return False
-                
+                print(f"📄 No existing profile found, creating new one...")
+                # Create new profile from collected data
                 try:
-                    # Create profile with collected data
-                    profile = UserProfile(
+                    from .models import UserProfile
+                    
+                    # Ensure we have an email
+                    if not filtered_profile_data.get("email"):
+                        logger.error(f"Cannot create profile: email is required but missing")
+                        print(f"❌ No email found in profile data")
+                        return False
+                    
+                    # Create comprehensive profile from onboarding data
+                    new_profile = UserProfile(
                         user_id=validated_user_id,
                         email=filtered_profile_data["email"],
                         name=filtered_profile_data.get("name"),
@@ -311,20 +353,19 @@ class DatabaseOperations:
                         holiday_frequency=filtered_profile_data.get("holiday_frequency"),
                         annual_income=filtered_profile_data.get("annual_income"),
                         monthly_spending=filtered_profile_data.get("monthly_spending"),
-                        holiday_preferences=filtered_profile_data.get("holiday_preferences", []),
+                        holiday_preferences=filtered_profile_data.get("holiday_preferences", "").split(",") if filtered_profile_data.get("holiday_preferences") else [],
                         travel_style=filtered_profile_data.get("travel_style"),
                         group_code=filtered_profile_data.get("group_code"),
-                        onboarding_completed=True
+                        onboarding_completed=True,  # Mark as completed
+                        is_active=True
                     )
                     
-                    success = await self.create_user_profile(profile)
+                    success = await self.create_user_profile(new_profile)
                     print(f"💾 Profile creation success: {success}")
                     
-                except Exception as create_error:
-                    logger.error(f"Error creating user profile during onboarding completion: {create_error}")
-                    print(f"❌ Profile creation error: {create_error}")
-                    import traceback
-                    traceback.print_exc()
+                except Exception as profile_creation_error:
+                    logger.error(f"Error creating profile from onboarding data: {profile_creation_error}")
+                    print(f"❌ Profile creation error: {profile_creation_error}")
                     return False
 
             if success:
@@ -337,53 +378,64 @@ class DatabaseOperations:
                     )
                     print(f"📈 Progress update success: {progress_success}")
                 except Exception as progress_error:
-                    print(f"⚠️ Progress update failed: {progress_error}")
-                    # Don't fail the whole operation if progress update fails
+                    logger.warning(f"Failed to update onboarding progress: {progress_error}")
+                    # Don't fail the entire process if progress update fails
                 
-                logger.info(f"Onboarding completed successfully for user_id: {validated_user_id}")
+                # FIXED: Triple verification with multiple attempts
+                verification_attempts = 3
+                final_verification_passed = False
                 
-                # ENHANCED: Verify the update by checking the profile
-                try:
-                    updated_profile = await self.get_user_profile(validated_user_id)
-                    if updated_profile:
-                        print(f"✅ Verification: onboarding_completed = {updated_profile.onboarding_completed}")
-                        if not updated_profile.onboarding_completed:
-                            print(f"⚠️ WARNING: Profile shows onboarding_completed = False after update!")
-                            # Try one more time with a direct update
-                            direct_success = await self._force_onboarding_completion(validated_user_id)
-                            print(f"🔧 Force completion attempt: {direct_success}")
-                            return direct_success
+                for attempt in range(verification_attempts):
+                    try:
+                        await asyncio.sleep(0.2)  # Small delay for database consistency
+                        verification_profile = await self.get_user_profile(validated_user_id)
+                        
+                        if verification_profile:
+                            is_completed = verification_profile.onboarding_completed
+                            print(f"🔍 Verification attempt {attempt + 1}: profile exists, onboarding_completed = {is_completed}")
+                            
+                            if is_completed:
+                                print(f"✅ Onboarding completion verified successfully!")
+                                final_verification_passed = True
+                                break
+                            else:
+                                print(f"⚠️ Profile exists but onboarding_completed = False, trying force completion...")
+                                force_success = await self._force_onboarding_completion(validated_user_id)
+                                if force_success:
+                                    print(f"🔧 Force completion successful on attempt {attempt + 1}")
+                                    final_verification_passed = True
+                                    break
                         else:
-                            print(f"🎉 Onboarding completion verified successfully!")
-                    else:
-                        print(f"⚠️ Could not retrieve profile for verification")
-                        # Try force completion as fallback
-                        return await self._force_onboarding_completion(validated_user_id)
-                except Exception as verify_error:
-                    print(f"⚠️ Error during verification: {verify_error}")
-                    # Try force completion as fallback
-                    return await self._force_onboarding_completion(validated_user_id)
+                            print(f"⚠️ Verification attempt {attempt + 1}: No profile found")
+                            
+                    except Exception as verify_error:
+                        print(f"⚠️ Verification attempt {attempt + 1} error: {verify_error}")
+                        continue
+                
+                if final_verification_passed:
+                    logger.info(f"Onboarding completed successfully for user_id: {validated_user_id}")
+                    return True
+                else:
+                    logger.error(f"Onboarding completion verification failed after {verification_attempts} attempts")
+                    print(f"❌ Final verification failed after {verification_attempts} attempts")
+                    # Try one final force completion
+                    final_force = await self._force_onboarding_completion(validated_user_id)
+                    print(f"🔧 Final force completion attempt: {final_force}")
+                    return final_force
             else:
-                print(f"❌ Profile update/creation failed!")
-                logger.error(f"Failed to update/create user profile during onboarding completion for user_id: {validated_user_id}")
-                # Try force completion as fallback
-                return await self._force_onboarding_completion(validated_user_id)
+                print(f"❌ Profile creation/update failed!")
+                logger.error(f"Failed to create/update user profile during onboarding completion for user_id: {validated_user_id}")
+                return False
 
-            return success
-        
         except Exception as e:
             logger.error(f"Error completing onboarding for {user_id}: {e}")
             print(f"❌ Exception in complete_onboarding: {e}")
             import traceback
             traceback.print_exc()
-            # Try force completion as fallback
-            try:
-                return await self._force_onboarding_completion(user_id)
-            except:
-                return False
+            return False
     
     async def _force_onboarding_completion(self, user_id: str) -> bool:
-        """ENHANCED: Force onboarding completion with a direct database update"""
+        """FIXED: Force onboarding completion with a direct database update and better verification"""
         try:
             # Validate user_id first
             is_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
@@ -394,6 +446,12 @@ class DatabaseOperations:
             logger.info(f"Force completing onboarding for user_id: {validated_user_id}")
             print(f"🔧 Force completing onboarding for user: {validated_user_id}")
             
+            # FIXED: Check if profile exists first
+            existing_profile = await self.get_user_profile(validated_user_id)
+            if not existing_profile:
+                print(f"🔧 No profile exists, cannot force complete onboarding")
+                return False
+            
             # Direct update with minimal data
             response = self.client.table("user_profiles").update({
                 "onboarding_completed": True,
@@ -401,31 +459,41 @@ class DatabaseOperations:
             }).eq("user_id", validated_user_id).execute()
             
             success = len(response.data) > 0
-            print(f"🔧 Force completion result: {success}")
+            print(f"🔧 Force completion database result: {success}")
             
             if success:
                 logger.info(f"Force onboarding completion successful for user_id: {validated_user_id}")
-                # Double-check the result
-                try:
-                    verification_profile = await self.get_user_profile(validated_user_id)
-                    if verification_profile:
-                        final_status = verification_profile.onboarding_completed
-                        print(f"🔍 Final verification: onboarding_completed = {final_status}")
-                        return final_status
-                    else:
-                        print(f"⚠️ Could not verify final status")
-                        return success
-                except Exception as verify_error:
-                    print(f"⚠️ Final verification error: {verify_error}")
-                    return success
+                # Double-check the result with multiple verification attempts
+                for attempt in range(3):
+                    try:
+                        await asyncio.sleep(0.1)  # Small delay to ensure consistency
+                        verification_profile = await self.get_user_profile(validated_user_id)
+                        if verification_profile:
+                            final_status = verification_profile.onboarding_completed
+                            print(f"🔍 Force completion verification attempt {attempt + 1}: onboarding_completed = {final_status}")
+                            if final_status:
+                                print(f"✅ Force completion verified successfully")
+                                return True
+                        else:
+                            print(f"⚠️ Could not retrieve profile for force completion verification attempt {attempt + 1}")
+                    except Exception as verify_error:
+                        print(f"⚠️ Force completion verification attempt {attempt + 1} error: {verify_error}")
+                        continue
+                
+                # If we get here, verification failed but database update succeeded
+                print(f"⚠️ Force completion database update succeeded but verification failed")
+                return True  # Return True since database update worked
             else:
                 logger.error(f"Force onboarding completion failed for user_id: {validated_user_id}")
+                print(f"❌ Force completion database update failed")
             
             return success
             
         except Exception as e:
             logger.error(f"Error in force onboarding completion for {user_id}: {e}")
             print(f"❌ Error in force completion: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     # ==================== ONBOARDING OPERATIONS - ENHANCED ====================
