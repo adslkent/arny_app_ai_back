@@ -9,13 +9,13 @@ from ..auth.supabase_auth import SupabaseAuth
 
 class OnboardingHandler:
     """
-    Handler for LLM-driven onboarding conversation flow - FIXED VERSION
+    Handler for LLM-driven onboarding conversation flow - ENHANCED COMPATIBILITY VERSION
     
-    Fixed Issues:
-    1. Better error handling for database operations
-    2. Proper loading of existing onboarding progress with JSON validation
-    3. Improved session continuity with better error handling
-    4. Fixed Pydantic validation errors for OnboardingProgress
+    Enhanced Features:
+    1. Better compatibility with enhanced database operations
+    2. Improved error handling for onboarding completion
+    3. Enhanced UUID validation for better reliability
+    4. Better session continuity with improved error handling
     """
     
     def __init__(self):
@@ -25,7 +25,7 @@ class OnboardingHandler:
     
     def _validate_user_id(self, user_id: str) -> tuple[bool, str]:
         """
-        Enhanced user ID validation with better error handling
+        Enhanced user ID validation with better error handling - COMPATIBLE WITH DATABASE OPERATIONS
         
         Args:
             user_id: User ID to validate
@@ -56,7 +56,7 @@ class OnboardingHandler:
     
     async def handle_request(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
-        Handle onboarding conversation requests - FIXED VERSION
+        Handle onboarding conversation requests - ENHANCED COMPATIBILITY VERSION
         
         Args:
             event: Lambda event containing request data
@@ -76,6 +76,8 @@ class OnboardingHandler:
             session_id = body.get('session_id', str(uuid.uuid4()))
             access_token = body.get('access_token')
             
+            print(f"🔍 ENHANCED: Onboarding request received for user_id: {raw_user_id}")
+            
             if not raw_user_id or not message:
                 return self._error_response(400, "Missing user_id or message")
             
@@ -85,7 +87,7 @@ class OnboardingHandler:
             # Enhanced user_id validation
             is_valid, user_id_or_error = self._validate_user_id(raw_user_id)
             if not is_valid:
-                print(f"UUID validation failed for '{raw_user_id}': {user_id_or_error}")
+                print(f"❌ UUID validation failed for '{raw_user_id}': {user_id_or_error}")
                 return self._error_response(400, f"Invalid user_id: {user_id_or_error}")
             
             user_id = user_id_or_error  # Now contains the cleaned user_id
@@ -110,7 +112,7 @@ class OnboardingHandler:
                 print(f"Note: Could not check user status (user may be new): {status_error}")
                 # Continue with onboarding even if status check fails
             
-            # Get user's onboarding progress - FIXED with better error handling and JSON validation
+            # Get user's onboarding progress - ENHANCED with better error handling and JSON validation
             progress_data = {
                 'collected_data': {},
                 'conversation_history': []
@@ -122,7 +124,7 @@ class OnboardingHandler:
                 if onboarding_progress:
                     print(f"📥 Found existing onboarding progress for user {user_id}")
                     
-                    # FIXED: Better handling of collected_data from database
+                    # ENHANCED: Better handling of collected_data from database
                     try:
                         stored_data = onboarding_progress.collected_data
                         if isinstance(stored_data, dict):
@@ -181,6 +183,25 @@ class OnboardingHandler:
             # Check if onboarding is complete
             if agent_response.get('onboarding_complete', False):
                 print(f"🎉 Onboarding completed for user {user_id}")
+                
+                # ENHANCED: Better verification of onboarding completion
+                try:
+                    # Wait a moment for database consistency
+                    import asyncio
+                    await asyncio.sleep(0.5)
+                    
+                    # Verify onboarding completion
+                    final_status = await self.db.get_user_status(user_id)
+                    if final_status and final_status.get('onboarding_completed', False):
+                        print(f"✅ Onboarding completion verified in database")
+                    else:
+                        print(f"⚠️ Onboarding completion not reflected in database yet")
+                        # Don't fail the response, just log the issue
+                        
+                except Exception as verification_error:
+                    print(f"⚠️ Could not verify onboarding completion: {verification_error}")
+                    # Don't fail the response, just log the issue
+                
                 return self._success_response({
                     'response': agent_response.get('message'),
                     'onboarding_complete': True,
@@ -217,13 +238,6 @@ class OnboardingHandler:
     async def handle_group_code_check(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
         Handle group code validation requests
-        
-        Args:
-            event: Lambda event containing group code check request
-            context: Lambda context
-            
-        Returns:
-            Group code validation response
         """
         
         try:
@@ -283,13 +297,6 @@ class OnboardingHandler:
     async def handle_create_group(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
         Handle creating a new group for a user
-        
-        Args:
-            event: Lambda event containing create group request
-            context: Lambda context
-            
-        Returns:
-            New group creation response
         """
         
         try:
@@ -340,13 +347,6 @@ class OnboardingHandler:
     async def handle_join_group(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
         Handle joining an existing group
-        
-        Args:
-            event: Lambda event containing join group request
-            context: Lambda context
-            
-        Returns:
-            Group join response
         """
         
         try:
@@ -407,13 +407,6 @@ class OnboardingHandler:
     async def handle_onboarding_status(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
         Handle requests for onboarding status and progress
-        
-        Args:
-            event: Lambda event containing status request
-            context: Lambda context
-            
-        Returns:
-            Onboarding status response
         """
         
         try:
