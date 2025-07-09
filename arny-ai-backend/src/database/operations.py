@@ -1,11 +1,11 @@
 """
-Database operations for Arny AI - FIXED VERSION WITH RELIABLE ONBOARDING COMPLETION
+Database operations for Arny AI - ENHANCED VERSION WITH GROUP INVITE COMPLETION FIX
 
-FIXED Issues:
-1. Simplified and reliable onboarding completion process
-2. Multiple strategies for ensuring onboarding completion flag is set
-3. Better error handling to prevent profile loss
-4. Enhanced logging for debugging onboarding issues
+ENHANCED Issues Fixed:
+1. Enhanced filtering for group invite fields during onboarding completion
+2. Improved error handling to prevent profile corruption during group invite completion
+3. Additional verification steps for group invite completion scenarios
+4. Better logging for debugging group invite onboarding issues
 """
 
 from typing import Optional, Dict, Any, List, Union, Tuple
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 class DatabaseOperations:
     """
-    Database operations using Supabase - FIXED VERSION WITH RELIABLE ONBOARDING COMPLETION
+    Database operations using Supabase - ENHANCED VERSION WITH GROUP INVITE COMPLETION FIX
     """
     
     def __init__(self):
@@ -343,7 +343,7 @@ class DatabaseOperations:
     
     async def complete_onboarding(self, user_id: str, profile_data: Dict[str, Any]) -> bool:
         """
-        FIXED: Mark onboarding as complete with SIMPLIFIED and RELIABLE approach
+        ENHANCED: Mark onboarding as complete with ENHANCED filtering for group invite fields
         """
         try:
             # Use consistent UUID validation
@@ -353,7 +353,8 @@ class DatabaseOperations:
                 return False
             
             logger.info(f"Completing onboarding for user_id: {validated_user_id}")
-            print(f"🎉 Starting SIMPLIFIED onboarding completion for user: {validated_user_id}")
+            print(f"🎉 Starting ENHANCED onboarding completion for user: {validated_user_id}")
+            print(f"📋 Input profile data keys: {list(profile_data.keys())}")
             
             # STEP 1: CRITICAL - Ensure onboarding completion flag is set FIRST
             print(f"🔥 CRITICAL STEP: Setting onboarding_completed = True")
@@ -366,25 +367,45 @@ class DatabaseOperations:
             
             print(f"✅ CRITICAL SUCCESS: Onboarding completion flag set successfully")
             
-            # STEP 2: OPTIONAL - Update profile data (don't fail if this doesn't work)
+            # STEP 2: OPTIONAL - Update profile data with ENHANCED filtering for group invite fields
             try:
-                print(f"📝 OPTIONAL STEP: Updating profile data")
+                print(f"📝 OPTIONAL STEP: Updating profile data with enhanced filtering")
                 
-                # Filter out fields that don't belong in user_profiles table
+                # ENHANCED: Filter out fields that don't belong in user_profiles table, including problematic group invite fields
                 user_profile_fields = {
                     'name', 'gender', 'birthdate', 'city', 'employer',
                     'working_schedule', 'holiday_frequency', 'annual_income',
                     'monthly_spending', 'holiday_preferences', 'travel_style',
-                    'group_code', 'email'
+                    'group_code', 'email', 'group_skipped'  # group_skipped is legitimate user preference
                 }
+                
+                # ENHANCED: Explicitly exclude only problematic fields that cause database issues
+                # NOTE: group_skipped is a legitimate user preference and should be preserved
+                group_invite_exclude_fields = {
+                    'group_invites_sent', 'group_invites_declined', 'group_code_shared',
+                    'invited_emails', 'conversation_history', 'current_step',
+                    'completion_timestamp', 'completed'
+                }
+                
+                # Allow group_role and group_skipped as they are legitimate profile data
 
-                # Better filtering and data cleaning
+                # Better filtering and data cleaning with enhanced exclusion
                 filtered_profile_data = {}
                 for key, value in profile_data.items():
-                    if key in user_profile_fields and value is not None and value != "":
+                    # Only include fields that belong in user_profiles and exclude problematic group invite fields
+                    if (key in user_profile_fields and 
+                        key not in group_invite_exclude_fields and 
+                        value is not None and value != ""):
                         filtered_profile_data[key] = value
+                    elif key in group_invite_exclude_fields:
+                        print(f"🚫 Excluding problematic field: {key} = {value}")
+                    elif key not in user_profile_fields:
+                        print(f"⚠️ Excluding non-profile field: {key} = {value}")
+                    else:
+                        print(f"⚠️ Excluding empty/null field: {key} = {value}")
 
                 print(f"📝 Filtered profile data: {list(filtered_profile_data.keys())}")
+                print(f"📝 Profile values: {filtered_profile_data}")
                 
                 if filtered_profile_data:
                     # Update profile data (but don't fail onboarding if this fails)
@@ -394,8 +415,10 @@ class DatabaseOperations:
                     if not profile_update_success:
                         logger.warning(f"Profile data update failed, but onboarding completion is still successful")
                         print(f"⚠️ Profile data update failed, but onboarding is still complete")
+                    else:
+                        print(f"✅ Profile data updated successfully")
                 else:
-                    print(f"ℹ️ No additional profile data to update")
+                    print(f"ℹ️ No additional profile data to update after filtering")
                     
             except Exception as profile_error:
                 logger.warning(f"Profile data update failed: {profile_error}, but onboarding completion is still successful")
@@ -403,10 +426,18 @@ class DatabaseOperations:
             
             # STEP 3: Update onboarding progress to completed
             try:
+                # ENHANCED: Include completion status for both group invite and skip cases
+                progress_completion_data = {
+                    "completed": True, 
+                    "completion_timestamp": datetime.utcnow().isoformat(),
+                    "group_invites_handled": profile_data.get("group_invites_sent", False),
+                    "group_setup_skipped": profile_data.get("group_skipped", False)
+                }
+                
                 progress_success = await self.update_onboarding_progress(
                     validated_user_id, 
                     OnboardingStep.COMPLETED, 
-                    {"completed": True, "completion_timestamp": datetime.utcnow().isoformat()}
+                    progress_completion_data
                 )
                 print(f"📈 Progress update success: {progress_success}")
             except Exception as progress_error:
@@ -414,19 +445,26 @@ class DatabaseOperations:
                 print(f"⚠️ Progress update failed: {progress_error}")
                 # Don't fail the entire process if progress update fails
             
-            # STEP 4: FINAL VERIFICATION
-            print(f"🔍 FINAL VERIFICATION: Checking onboarding completion status")
-            verification_attempts = 3
+            # STEP 4: ENHANCED FINAL VERIFICATION with multiple attempts
+            print(f"🔍 ENHANCED FINAL VERIFICATION: Checking onboarding completion status")
+            verification_attempts = 5  # Increased attempts for group invite case
             
             for attempt in range(verification_attempts):
                 try:
-                    await asyncio.sleep(0.2 * (attempt + 1))  # Progressive delay
+                    await asyncio.sleep(0.3 * (attempt + 1))  # Progressive delay for database consistency
                     verification_profile = await self.get_user_profile(validated_user_id)
                     
                     if verification_profile and verification_profile.onboarding_completed:
-                        print(f"✅ FINAL VERIFICATION PASSED: Onboarding completion confirmed!")
+                        print(f"✅ ENHANCED VERIFICATION PASSED: Onboarding completion confirmed!")
                         logger.info(f"Onboarding completed successfully for user_id: {validated_user_id}")
-                        return True
+                        
+                        # ADDITIONAL: Verify the profile has all expected data
+                        if verification_profile.email and verification_profile.name:
+                            print(f"✅ Profile data verification: email={verification_profile.email}, name={verification_profile.name}")
+                            return True
+                        else:
+                            print(f"⚠️ Profile missing critical data: email={verification_profile.email}, name={verification_profile.name}")
+                            # Continue to next attempt
                     else:
                         print(f"⚠️ Verification attempt {attempt + 1}: onboarding_completed = {verification_profile.onboarding_completed if verification_profile else 'No profile'}")
                         
@@ -436,14 +474,21 @@ class DatabaseOperations:
                             final_force = await self._force_onboarding_completion(validated_user_id)
                             if final_force:
                                 print(f"✅ Final force completion successful")
-                                return True
+                                # One more verification after final force
+                                await asyncio.sleep(0.5)
+                                final_verification = await self.get_user_profile(validated_user_id)
+                                if final_verification and final_verification.onboarding_completed:
+                                    print(f"✅ Final verification after force: SUCCESS")
+                                    return True
+                                else:
+                                    print(f"❌ Final verification after force: FAILED")
                             
                 except Exception as verify_error:
                     print(f"⚠️ Verification attempt {attempt + 1} error: {verify_error}")
                     continue
             
-            print(f"❌ FINAL VERIFICATION FAILED after {verification_attempts} attempts")
-            logger.error(f"Final verification failed for user_id: {validated_user_id}")
+            print(f"❌ ENHANCED VERIFICATION FAILED after {verification_attempts} attempts")
+            logger.error(f"Enhanced verification failed for user_id: {validated_user_id}")
             return False
 
         except Exception as e:
