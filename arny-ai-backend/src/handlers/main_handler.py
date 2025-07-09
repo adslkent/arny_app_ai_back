@@ -185,7 +185,7 @@ class MainHandler:
     
     async def handle_auth_request(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
-        Handle authentication requests (sign up, sign in, etc.) - FIXED VERSION
+        Handle authentication requests (sign up, sign in, etc.) - FIXED VERSION WITH ROBUST PROFILE CREATION
         
         Args:
             event: Lambda event containing auth request
@@ -210,33 +210,66 @@ class MainHandler:
                 auth_result = await self.auth.sign_up(email, password, metadata)
                 
                 if auth_result.get("success"):
-                    # FIXED: Handle user profile creation more gracefully
+                    # FIXED: More robust user profile creation with retry logic
+                    user_created_id = auth_result["user"]["id"]
+                    print(f"🎉 User created with ID: {user_created_id}")
+                    
                     try:
-                        # Check if user profile already exists
-                        existing_profile = await self.db.get_user_profile(auth_result["user"]["id"])
+                        # FIXED: Ensure profile creation is successful with multiple attempts
+                        profile_created = False
+                        max_attempts = 3
                         
-                        if not existing_profile:
-                            # Create initial user profile only if it doesn't exist
-                            from ..database.models import UserProfile
-                            
-                            user_profile = UserProfile(
-                                user_id=auth_result["user"]["id"],
-                                email=email,
-                                onboarding_completed=False
-                            )
-                            
-                            profile_created = await self.db.create_user_profile(user_profile)
-                            if profile_created:
-                                print(f"✅ User profile created for: {email}")
-                            else:
-                                print(f"⚠️ User profile creation failed for: {email}")
-                        else:
-                            print(f"ℹ️ User profile already exists for: {email}")
-                            
+                        for attempt in range(max_attempts):
+                            try:
+                                print(f"🔄 Profile creation attempt {attempt + 1} for user: {user_created_id}")
+                                
+                                # Check if user profile already exists
+                                existing_profile = await self.db.get_user_profile(user_created_id)
+                                
+                                if existing_profile:
+                                    print(f"ℹ️ User profile already exists for: {email}")
+                                    profile_created = True
+                                    break
+                                
+                                # Create initial user profile
+                                from ..database.models import UserProfile
+                                
+                                user_profile = UserProfile(
+                                    user_id=user_created_id,
+                                    email=email,
+                                    onboarding_completed=False
+                                )
+                                
+                                profile_created = await self.db.create_user_profile(user_profile)
+                                
+                                if profile_created:
+                                    print(f"✅ User profile created successfully for: {email}")
+                                    
+                                    # FIXED: Verify the profile was actually created
+                                    verification_profile = await self.db.get_user_profile(user_created_id)
+                                    if verification_profile:
+                                        print(f"✅ Profile creation verified for: {email}")
+                                        break
+                                    else:
+                                        print(f"⚠️ Profile creation verification failed, retrying...")
+                                        profile_created = False
+                                else:
+                                    print(f"⚠️ Profile creation attempt {attempt + 1} failed for: {email}")
+                                    
+                            except Exception as attempt_error:
+                                print(f"⚠️ Profile creation attempt {attempt + 1} error: {attempt_error}")
+                                continue
+                        
+                        if not profile_created:
+                            print(f"❌ Failed to create profile after {max_attempts} attempts for: {email}")
+                            # FIXED: Still return success for auth, but log the profile creation failure
+                            print(f"⚠️ User authentication succeeded but profile creation failed")
+                        
                     except Exception as profile_error:
-                        # FIXED: Don't fail signup if profile creation fails
+                        # FIXED: Don't fail signup if profile creation fails, but log it
                         print(f"⚠️ User profile creation error (non-critical): {profile_error}")
-                        # Continue with successful auth response even if profile creation fails
+                        import traceback
+                        traceback.print_exc()
                     
                     # Convert datetime objects to strings for JSON serialization
                     user_data = auth_result["user"].copy()
@@ -357,11 +390,13 @@ class MainHandler:
                 
         except Exception as e:
             print(f"Error in auth handler: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return self._error_response(500, "Internal server error")
     
     async def handle_user_status(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
-        Handle user status requests (check onboarding completion, etc.)
+        Handle user status requests (check onboarding completion, etc.) - FIXED VERSION
         
         Args:
             event: Lambda event containing user status request
@@ -384,16 +419,54 @@ class MainHandler:
             if not auth_result.get("success"):
                 return self._error_response(401, "Invalid or expired token")
             
-            # Get user status
-            user_status = await self.db.get_user_status(user_id)
+            # FIXED: Add more detailed logging for debugging
+            print(f"🔍 Getting user status for user_id: {user_id}")
             
-            if user_status:
-                return self._success_response(user_status)
-            else:
-                return self._error_response(404, "User not found")
+            # Get user status with enhanced error handling
+            try:
+                user_status = await self.db.get_user_status(user_id)
+                
+                if user_status:
+                    print(f"✅ User status found for user_id: {user_id}")
+                    print(f"📊 Status data: onboarding_completed={user_status.get('onboarding_completed')}")
+                    return self._success_response(user_status)
+                else:
+                    print(f"❌ No user status found for user_id: {user_id}")
+                    
+                    # FIXED: Try to diagnose the issue
+                    try:
+                        # Check if user profile exists directly
+                        user_profile = await self.db.get_user_profile(user_id)
+                        if user_profile:
+                            print(f"🔍 User profile exists but get_user_status failed")
+                            # Return basic status from profile
+                            return self._success_response({
+                                "user_id": user_id,
+                                "email": user_profile.email,
+                                "onboarding_completed": user_profile.onboarding_completed,
+                                "is_active": user_profile.is_active,
+                                "current_step": "unknown",
+                                "completion_percentage": 100.0 if user_profile.onboarding_completed else 0.0,
+                                "groups": [],
+                                "profile": user_profile.dict()
+                            })
+                        else:
+                            print(f"🔍 User profile does not exist for user_id: {user_id}")
+                            return self._error_response(404, "User not found")
+                    except Exception as diagnosis_error:
+                        print(f"❌ Error during diagnosis: {diagnosis_error}")
+                        return self._error_response(404, "User not found")
+                    
+            except Exception as status_error:
+                print(f"❌ Error getting user status: {status_error}")
+                import traceback
+                traceback.print_exc()
+                return self._error_response(500, f"Error retrieving user status: {str(status_error)}")
                 
         except Exception as e:
             print(f"Error in user status handler: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return self._error_response(500, "Internal server error")
     
     def _success_response(self, data: Dict[str, Any]) -> Dict[str, Any]:
