@@ -9,13 +9,13 @@ from ..auth.supabase_auth import SupabaseAuth
 
 class OnboardingHandler:
     """
-    Handler for LLM-driven onboarding conversation flow - ENHANCED COMPATIBILITY VERSION
+    Handler for LLM-driven onboarding conversation flow - ENHANCED FOR GROUP INVITE COMPLETION
     
     Enhanced Features:
-    1. Better compatibility with enhanced database operations
-    2. Improved error handling for onboarding completion
-    3. Enhanced UUID validation for better reliability
-    4. Better session continuity with improved error handling
+    1. Better group invite completion handling
+    2. Enhanced error handling for onboarding completion scenarios
+    3. Improved verification steps for group invite cases
+    4. Better session continuity with enhanced error handling
     """
     
     def __init__(self):
@@ -56,7 +56,7 @@ class OnboardingHandler:
     
     async def handle_request(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
-        Handle onboarding conversation requests - ENHANCED COMPATIBILITY VERSION
+        Handle onboarding conversation requests - ENHANCED FOR GROUP INVITE COMPLETION
         
         Args:
             event: Lambda event containing request data
@@ -77,6 +77,7 @@ class OnboardingHandler:
             access_token = body.get('access_token')
             
             print(f"🔍 ENHANCED: Onboarding request received for user_id: {raw_user_id}")
+            print(f"📝 Message preview: '{message[:50]}...' if message else 'No message'")
             
             if not raw_user_id or not message:
                 return self._error_response(400, "Missing user_id or message")
@@ -180,23 +181,47 @@ class OnboardingHandler:
                 traceback.print_exc()
                 return self._error_response(500, f"Onboarding agent error: {str(agent_error)}")
             
-            # Check if onboarding is complete
+            # ENHANCED: Check if onboarding is complete with better verification
             if agent_response.get('onboarding_complete', False):
                 print(f"🎉 Onboarding completed for user {user_id}")
                 
-                # ENHANCED: Better verification of onboarding completion
+                # ENHANCED: Better verification of onboarding completion for group invite cases
                 try:
-                    # Wait a moment for database consistency
-                    import asyncio
-                    await asyncio.sleep(0.5)
+                    # Wait longer for database consistency in group invite cases
+                    collected_data = agent_response.get('collected_data', {})
+                    is_group_invite_case = collected_data.get('group_invites_sent', False)
                     
-                    # Verify onboarding completion
-                    final_status = await self.db.get_user_status(user_id)
-                    if final_status and final_status.get('onboarding_completed', False):
-                        print(f"✅ Onboarding completion verified in database")
+                    if is_group_invite_case:
+                        print(f"📧 Group invite case detected - using enhanced verification")
+                        import asyncio
+                        await asyncio.sleep(1.0)  # Longer wait for group invite cases
                     else:
-                        print(f"⚠️ Onboarding completion not reflected in database yet")
+                        import asyncio
+                        await asyncio.sleep(0.5)  # Standard wait
+                    
+                    # Enhanced verification with multiple attempts
+                    verification_attempts = 3 if is_group_invite_case else 2
+                    verification_success = False
+                    
+                    for attempt in range(verification_attempts):
+                        print(f"🔍 Verification attempt {attempt + 1}/{verification_attempts}")
+                        
+                        final_status = await self.db.get_user_status(user_id)
+                        if final_status and final_status.get('onboarding_completed', False):
+                            print(f"✅ Onboarding completion verified in database (attempt {attempt + 1})")
+                            verification_success = True
+                            break
+                        else:
+                            print(f"⚠️ Onboarding completion not reflected in database yet (attempt {attempt + 1})")
+                            if attempt < verification_attempts - 1:
+                                await asyncio.sleep(0.5 * (attempt + 2))  # Progressive delay
+                    
+                    if not verification_success:
+                        print(f"⚠️ Onboarding completion verification failed after {verification_attempts} attempts")
+                        print(f"⚠️ This may indicate a database consistency issue")
                         # Don't fail the response, just log the issue
+                    else:
+                        print(f"🎯 Onboarding completion verification successful!")
                         
                 except Exception as verification_error:
                     print(f"⚠️ Could not verify onboarding completion: {verification_error}")
@@ -207,7 +232,8 @@ class OnboardingHandler:
                     'onboarding_complete': True,
                     'collected_data': agent_response.get('collected_data', {}),
                     'redirect_to_main': True,
-                    'session_id': session_id
+                    'session_id': session_id,
+                    'completion_verified': verification_success if 'verification_success' in locals() else None
                 })
             else:
                 print(f"🔄 Onboarding continuing for user {user_id}")
