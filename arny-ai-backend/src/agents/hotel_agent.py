@@ -1,11 +1,11 @@
 """
-Hotel Search Agent Module - ULTRA-OPTIMIZED VERSION to prevent timeouts
+Hotel Search Agent Module - TIMEOUT REMOVED VERSION to match flight agent
 
-This module provides a hotel search agent with timeout prevention optimizations:
-1. Prevents duplicate API calls through smart caching
-2. Ultra-fast city name conversion
-3. 10-second timeout limits on all AI calls
-4. Multiple fallback layers for reliability
+This module provides a hotel search agent without timeout protections:
+1. No timeout limits on Amadeus API calls  
+2. No timeout limits on profile filtering
+3. No timeout limits on agent processing
+4. Works similarly to the flight agent
 
 Usage example:
 ```python
@@ -114,7 +114,7 @@ Be fast and efficient. One tool call per request."""
 async def search_hotels_tool(destination: str, check_in_date: str, check_out_date: Optional[str] = None,
                             adults: int = 1, rooms: int = 1) -> dict:
     """
-    ULTRA-OPTIMIZED: Search for hotels with timeout prevention
+    Search for hotels - NO TIMEOUT PROTECTION (matching flight agent pattern)
     
     Args:
         destination: Destination city (e.g., 'Sydney', 'NYC')
@@ -127,7 +127,7 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
         Dict with hotel search results and profile filtering information
     """
     
-    print(f"🚀 ULTRA-OPTIMIZED: Hotel search started for {destination}")
+    print(f"🚀 Hotel search started for {destination}")
     start_time = datetime.now()
     
     try:
@@ -164,49 +164,19 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
                     "message": "Please provide check-in date in YYYY-MM-DD format"
                 }
         
-        # OPTIMIZATION 5: Ultra-fast Amadeus API call with 8-second timeout
-        print(f"🏨 Calling Amadeus API with 8s timeout...")
+        # REMOVED TIMEOUT: Direct Amadeus API call (matching flight agent pattern)
+        print(f"🏨 Calling Amadeus API...")
         
-        try:
-            # Set 8-second timeout for Amadeus API
-            api_timeout_task = asyncio.create_task(asyncio.sleep(8))
-            amadeus_task = asyncio.create_task(
-                hotel_agent.amadeus_service.search_hotels(
-                    city_code=city_code,
-                    check_in_date=check_in_date,
-                    check_out_date=check_out_date,
-                    adults=adults,
-                    rooms=rooms,
-                    max_results=6  # Limit to 6 for ultra-speed
-                )
+        search_results = _run_async_safely(
+            hotel_agent.amadeus_service.search_hotels(
+                city_code=city_code,
+                check_in_date=check_in_date,
+                check_out_date=check_out_date,
+                adults=adults,
+                rooms=rooms,
+                max_results=6  # Limit to 6 for speed
             )
-            
-            done, pending = await asyncio.wait(
-                [api_timeout_task, amadeus_task],
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            
-            # Cancel pending tasks
-            for task in pending:
-                task.cancel()
-            
-            if amadeus_task in done:
-                search_results = amadeus_task.result()
-            else:
-                print(f"⚠️ Amadeus API timeout after 8s")
-                return {
-                    "success": False,
-                    "error": "Amadeus API timeout",
-                    "message": f"Hotel search timed out. Please try a different destination."
-                }
-                
-        except Exception as amadeus_error:
-            print(f"❌ Amadeus API error: {amadeus_error}")
-            return {
-                "success": False,
-                "error": str(amadeus_error),
-                "message": f"Sorry, I couldn't find hotels in {destination}. Please try again."
-            }
+        )
         
         print(f"📊 Amadeus API response: success={search_results.get('success')}, results={len(search_results.get('results', []))}")
         
@@ -218,7 +188,7 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
                 "message": f"Sorry, I couldn't find hotels in {destination} for {check_in_date} to {check_out_date}."
             }
         
-        # OPTIMIZATION 6: Ultra-fast profile filtering with 10s timeout
+        # REMOVED TIMEOUT: Direct profile filtering (matching flight agent pattern)
         search_params = {
             "city_code": city_code,
             "destination": destination,
@@ -228,50 +198,17 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
             "rooms": rooms
         }
         
-        print(f"🔧 Ultra-fast profile filtering with 10s timeout...")
+        print(f"🔧 Profile filtering...")
         
-        try:
-            # Set 10-second timeout for profile filtering
-            filter_timeout_task = asyncio.create_task(asyncio.sleep(10))
-            filter_task = asyncio.create_task(
-                hotel_agent.profile_agent.filter_hotel_results(
-                    user_id=hotel_agent.current_user_id,
-                    hotel_results=search_results["results"],
-                    search_params=search_params
-                )
+        filtering_result = _run_async_safely(
+            hotel_agent.profile_agent.filter_hotel_results(
+                user_id=hotel_agent.current_user_id,
+                hotel_results=search_results["results"],
+                search_params=search_params
             )
-            
-            done, pending = await asyncio.wait(
-                [filter_timeout_task, filter_task],
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            
-            # Cancel pending tasks
-            for task in pending:
-                task.cancel()
-            
-            if filter_task in done:
-                filtering_result = filter_task.result()
-                print(f"✅ Filtering complete: {filtering_result['filtered_count']} of {filtering_result['original_count']} results")
-            else:
-                print(f"⚠️ Profile filtering timeout after 10s, using original results")
-                filtering_result = {
-                    "filtered_results": search_results["results"][:3],  # Top 3 results
-                    "original_count": len(search_results["results"]),
-                    "filtered_count": min(3, len(search_results["results"])),
-                    "filtering_applied": False,
-                    "rationale": "Used top results due to timeout"
-                }
-                
-        except Exception as filter_error:
-            print(f"⚠️ Profile filtering error: {filter_error}, using original results")
-            filtering_result = {
-                "filtered_results": search_results["results"][:3],  # Top 3 results
-                "original_count": len(search_results["results"]),
-                "filtered_count": min(3, len(search_results["results"])),
-                "filtering_applied": False,
-                "rationale": f"Used top results due to filtering error: {str(filter_error)}"
-            }
+        )
+        
+        print(f"✅ Filtering complete: {filtering_result['filtered_count']} of {filtering_result['original_count']} results")
         
         # OPTIMIZATION 7: Ultra-fast database save (no await)
         hotel_search = HotelSearch(
@@ -339,7 +276,7 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
 
 class HotelAgent:
     """
-    ULTRA-OPTIMIZED Hotel agent to prevent timeouts
+    Hotel agent without timeout protections (matching flight agent)
     """
     
     def __init__(self):
@@ -366,7 +303,7 @@ class HotelAgent:
         # Set this instance as the global instance for tools
         _current_hotel_agent = self
         
-        # Create the agent with ultra-optimized settings
+        # Create the agent with optimized settings
         self.agent = Agent(
             name="Arny Hotel Assistant", 
             instructions=get_hotel_system_message(),
@@ -377,11 +314,11 @@ class HotelAgent:
     async def process_message(self, user_id: str, message: str, session_id: str,
                              user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
         """
-        ULTRA-OPTIMIZED: Process hotel search requests with timeout prevention
+        Process hotel search requests - NO TIMEOUT PROTECTION (matching flight agent)
         """
         
         try:
-            print(f"🏨 ULTRA-OPTIMIZED: HotelAgent processing: '{message[:50]}...'")
+            print(f"🏨 HotelAgent processing: '{message[:50]}...'")
             start_time = datetime.now()
             
             # Clear previous search results
@@ -415,40 +352,18 @@ class HotelAgent:
             
             print(f"🔧 Processing with {len(context_messages)} previous messages")
             
-            # ULTRA-OPTIMIZATION: Set 20-second timeout for entire agent processing
-            try:
-                agent_timeout_task = asyncio.create_task(asyncio.sleep(20))
-                
-                if not context_messages:
-                    # First message in conversation
-                    print("🚀 Starting new hotel conversation")
-                    agent_task = asyncio.create_task(Runner.run(self.agent, message))
-                else:
-                    # Continue conversation with context
-                    print("🔄 Continuing hotel conversation with context")
-                    agent_task = asyncio.create_task(
-                        Runner.run(self.agent, context_messages + [{"role": "user", "content": message}])
-                    )
-                
-                done, pending = await asyncio.wait(
-                    [agent_timeout_task, agent_task],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-                
-                # Cancel pending tasks
-                for task in pending:
-                    task.cancel()
-                
-                if agent_task in done:
-                    result = agent_task.result()
-                    assistant_message = result.final_output
-                else:
-                    print(f"⚠️ Agent processing timeout after 20s")
-                    assistant_message = "I'm still searching for hotels. This is taking longer than expected. Please try again with a more specific location."
-                    
-            except Exception as agent_error:
-                print(f"❌ Agent processing error: {agent_error}")
-                assistant_message = "I encountered an error while searching for hotels. Please try again or be more specific about your destination."
+            # REMOVED TIMEOUT: Direct agent processing (matching flight agent pattern)
+            if not context_messages:
+                # First message in conversation
+                print("🚀 Starting new hotel conversation")
+                result = await Runner.run(self.agent, message)
+            else:
+                # Continue conversation with context
+                print("🔄 Continuing hotel conversation with context")
+                result = await Runner.run(self.agent, context_messages + [{"role": "user", "content": message}])
+            
+            # Extract response
+            assistant_message = result.final_output
             
             # Get search results from global instance
             global_agent = _get_hotel_agent()
