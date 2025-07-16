@@ -1,3 +1,23 @@
+"""
+Flight Search Agent Module - ENHANCED VERSION with Cache Management
+
+This module provides a flight search agent with enhanced capabilities including:
+1. Support for up to 50 flight results from Amadeus API
+2. Send all flights to OpenAI for filtering
+3. Return up to 10 filtered flight results
+4. Optimized for larger datasets
+5. Cache management for improved performance
+
+Usage example:
+```python
+from flight_agent import FlightAgent
+
+# Create and use the agent
+agent = FlightAgent()
+result = await agent.process_message(user_id, "Find flights from Sydney to LA", session_id, {}, [])
+```
+"""
+
 import uuid
 import logging
 import asyncio
@@ -142,7 +162,7 @@ def search_flights_tool(origin: str, destination: str, departure_date: str,
                        return_date: Optional[str] = None, adults: int = 1, 
                        cabin_class: str = "ECONOMY") -> dict:
     """
-    Search for flights using Amadeus API with group profile filtering
+    Search for flights using Amadeus API with group profile filtering and cache management
     
     Args:
         origin: Origin airport/city code (e.g., 'SYD', 'Sydney')
@@ -160,6 +180,12 @@ def search_flights_tool(origin: str, destination: str, departure_date: str,
         agent = _get_flight_agent()
         if not agent:
             return {"success": False, "error": "Flight agent not available"}
+        
+        # ADDED: Cache management similar to hotel agent
+        search_key = f"{origin}_{destination}_{departure_date}_{return_date}_{adults}_{cabin_class}"
+        if hasattr(agent, '_search_cache') and search_key in agent._search_cache:
+            print(f"⚡ CACHE HIT: Returning cached flight results for {search_key}")
+            return agent._search_cache[search_key]
         
         # FIXED: Check if context is properly set
         if not hasattr(agent, 'current_user_id') or not agent.current_user_id:
@@ -271,6 +297,16 @@ def search_flights_tool(origin: str, destination: str, departure_date: str,
                 "rationale": filtering_result["rationale"]
             }
         }
+        
+        # ADDED: Cache the result (matching hotel agent pattern)
+        if not hasattr(agent, '_search_cache'):
+            agent._search_cache = {}
+        agent._search_cache[search_key] = result_payload
+        
+        # ADDED: Keep cache manageable (same as hotel agent - max 10 entries)
+        if len(agent._search_cache) > 10:
+            oldest_key = list(agent._search_cache.keys())[0]
+            del agent._search_cache[oldest_key]
         
         print(f"✅ Flight search completed successfully!")
         return result_payload
@@ -430,7 +466,7 @@ def get_flight_pricing_tool(flight_selection: str) -> dict:
 
 class FlightAgent:
     """
-    Flight agent using OpenAI Agents SDK with Amadeus API tools and profile filtering
+    Flight agent using OpenAI Agents SDK with Amadeus API tools, profile filtering, and cache management
     """
     
     def __init__(self):
@@ -450,6 +486,9 @@ class FlightAgent:
         self.latest_search_results = []
         self.latest_search_id = None
         self.latest_filtering_info = {}
+        
+        # ADDED: Initialize search cache for enhanced performance (matching hotel agent)
+        self._search_cache = {}
         
         # Store this instance globally for tool access
         _current_flight_agent = self
