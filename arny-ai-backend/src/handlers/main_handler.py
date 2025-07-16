@@ -14,7 +14,7 @@ from ..auth.supabase_auth import SupabaseAuth
 class MainHandler:
     """
     Main handler that routes requests to appropriate agents for the main travel conversation flow
-    FIXED VERSION with enhanced user status debugging and error handling
+    ENHANCED: Now optimized for Function URL with extended timeouts
     """
     
     def __init__(self):
@@ -24,12 +24,32 @@ class MainHandler:
         self.flight_agent = FlightAgent()
         self.hotel_agent = HotelAgent()
     
+    def _extract_request_body(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract request body from either API Gateway or Function URL event
+        ENHANCED: Handles both event types
+        """
+        
+        body = event.get('body')
+        
+        # Handle different event formats
+        if isinstance(body, str):
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError:
+                return {}
+        elif isinstance(body, dict):
+            return body
+        else:
+            return {}
+    
     async def handle_request(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
         Main handler for travel agent requests
+        ENHANCED: Optimized for extended timeouts with Function URLs
         
         Args:
-            event: Lambda event containing request data
+            event: Lambda event containing request data (API Gateway or Function URL)
             context: Lambda context
             
         Returns:
@@ -37,8 +57,8 @@ class MainHandler:
         """
         
         try:
-            # Parse the incoming request
-            body = json.loads(event.get('body', '{}'))
+            # Parse the incoming request (works for both API Gateway and Function URL)
+            body = self._extract_request_body(event)
             
             # Extract key information
             user_id = body.get('user_id')
@@ -46,7 +66,14 @@ class MainHandler:
             session_id = body.get('session_id')  # Can be None
             access_token = body.get('access_token')
             
-            print(f"🔍 Request received - user_id: {user_id}, session_id: {session_id}, message: {message[:50]}...")
+            # Detect event type for logging (should always be Function URL now)
+            is_function_url = event.get('version') == '2.0' and 'rawPath' in event
+            if not is_function_url:
+                print(f"⚠️ WARNING: Travel chat received non-Function URL request - this is unexpected")
+            
+            event_type = "Function URL" if is_function_url else "API Gateway (Unexpected)"
+            
+            print(f"🔍 {event_type} request received - user_id: {user_id}, session_id: {session_id}, message: {message[:50] if message else 'None'}...")
             
             if not user_id or not message:
                 return self._error_response(400, "Missing user_id or message")
@@ -54,7 +81,7 @@ class MainHandler:
             if not access_token:
                 return self._error_response(401, "Missing access_token")
             
-            # FIXED: Ensure session_id is always a valid UUID string
+            # ENHANCED: Ensure session_id is always a valid UUID string
             if not session_id:
                 session_id = str(uuid.uuid4())
                 print(f"📝 Generated new session_id: {session_id}")
@@ -68,26 +95,34 @@ class MainHandler:
                     print(f"⚠️ Invalid session_id provided, generated new one: {session_id}")
             
             # Verify user authentication
+            print(f"🔐 Verifying authentication...")
             auth_result = await self.auth.verify_token(access_token)
             if not auth_result.get("success"):
                 return self._error_response(401, "Invalid or expired token")
             
+            print(f"✅ Authentication verified")
+            
             # Get user's profile and conversation history
+            print(f"👤 Getting user profile...")
             user_profile = await self.db.get_user_profile(user_id)
             if not user_profile:
                 return self._error_response(404, "User profile not found")
             
             print(f"👤 User profile found: {user_profile.email}")
             
-            # FIXED: Better error handling for conversation history
+            # ENHANCED: Better error handling for conversation history
             try:
+                print(f"💬 Getting conversation history...")
                 conversation_history = await self.db.get_conversation_history(user_id, session_id)
                 print(f"💬 Retrieved {len(conversation_history)} previous messages")
             except Exception as e:
                 print(f"⚠️ Error getting conversation history: {e}, continuing with empty history")
                 conversation_history = []
             
-            # Process message through supervisor agent first
+            # ENHANCED: Process message through supervisor agent with extended timeout support
+            print(f"🤖 Processing with SupervisorAgent...")
+            start_time = datetime.now()
+            
             supervisor_response = await self.supervisor_agent.process_message(
                 user_id=user_id,
                 message=message,
@@ -96,11 +131,14 @@ class MainHandler:
                 conversation_history=conversation_history
             )
             
-            print(f"🤖 Supervisor response - agent_type: {supervisor_response.get('agent_type')}")
+            processing_time = (datetime.now() - start_time).total_seconds()
+            print(f"🤖 Supervisor response completed in {processing_time:.2f}s - agent_type: {supervisor_response.get('agent_type')}")
             
             # Check if we need to route to a specific agent
             if supervisor_response.get("requires_routing"):
                 route_to = supervisor_response.get("route_to")
+                
+                print(f"🔀 Routing to specialized agent: {route_to}")
                 
                 if route_to == "flight_agent":
                     agent_response = await self.flight_agent.process_message(
@@ -131,23 +169,32 @@ class MainHandler:
                 # Use supervisor response directly
                 agent_response = supervisor_response
             
-            # FIXED: Ensure session_id is not None before saving
+            total_processing_time = (datetime.now() - start_time).total_seconds()
+            print(f"⚡ Total processing time: {total_processing_time:.2f}s")
+            
+            # ENHANCED: Ensure session_id is not None before saving
             if not session_id:
                 session_id = str(uuid.uuid4())
                 print(f"⚠️ session_id was None before saving, generated: {session_id}")
             
-            # Save conversation to database with better error handling
+            # Save conversation to database with better error handling (async for performance)
             try:
-                await self.db.save_conversation_turn(
-                    user_id=user_id,
-                    session_id=session_id,
-                    user_message=message,
-                    assistant_response=agent_response.get('message', ''),
-                    metadata=agent_response.get('metadata', {})
+                print(f"💾 Saving conversation...")
+                # Use asyncio.create_task for non-blocking save
+                save_task = asyncio.create_task(
+                    self.db.save_conversation_turn(
+                        user_id=user_id,
+                        session_id=session_id,
+                        user_message=message,
+                        assistant_response=agent_response.get('message', ''),
+                        metadata=agent_response.get('metadata', {})
+                    )
                 )
-                print("💾 Conversation saved successfully")
+                
+                # Don't wait for save to complete (fire-and-forget for better performance)
+                print("💾 Conversation save initiated (async)")
             except Exception as e:
-                print(f"⚠️ Error saving conversation: {e}, continuing with response")
+                print(f"⚠️ Error initiating conversation save: {e}, continuing with response")
                 # Don't fail the request if saving fails
             
             # Format response
@@ -155,7 +202,9 @@ class MainHandler:
                 'response': agent_response.get('message'),
                 'agent_type': agent_response.get('agent_type', 'main_travel'),
                 'session_id': session_id,  # Always return the session_id
-                'requires_action': agent_response.get('requires_action', False)
+                'requires_action': agent_response.get('requires_action', False),
+                'processing_time': total_processing_time,
+                'event_type': event_type
             }
             
             # Add additional data based on agent type
@@ -163,20 +212,22 @@ class MainHandler:
                 response_data.update({
                     'search_results': agent_response.get('search_results', []),
                     'search_id': agent_response.get('search_id'),
-                    'flight_selected': agent_response.get('flight_selected')
+                    'flight_selected': agent_response.get('flight_selected'),
+                    'filtering_info': agent_response.get('filtering_info', {})
                 })
             elif agent_response.get('agent_type') == 'hotel':
                 response_data.update({
                     'search_results': agent_response.get('search_results', []),
                     'search_id': agent_response.get('search_id'),
-                    'hotel_selected': agent_response.get('hotel_selected')
+                    'hotel_selected': agent_response.get('hotel_selected'),
+                    'filtering_info': agent_response.get('filtering_info', {})
                 })
             
             # Add metadata if present
             if agent_response.get('metadata'):
                 response_data['metadata'] = agent_response['metadata']
             
-            print(f"✅ Request completed successfully")
+            print(f"✅ Request completed successfully in {total_processing_time:.2f}s via {event_type}")
             return self._success_response(response_data)
             
         except Exception as e:
@@ -187,7 +238,7 @@ class MainHandler:
     
     async def handle_auth_request(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
-        Handle authentication requests (sign up, sign in, etc.) - FIXED VERSION WITH ROBUST PROFILE CREATION
+        Handle authentication requests (sign up, sign in, etc.) - ENHANCED VERSION WITH ROBUST PROFILE CREATION
         
         Args:
             event: Lambda event containing auth request
@@ -198,7 +249,7 @@ class MainHandler:
         """
         
         try:
-            body = json.loads(event.get('body', '{}'))
+            body = self._extract_request_body(event)
             action = body.get('action')  # 'signup', 'signin', 'refresh', 'signout'
             
             if action == 'signup':
@@ -212,12 +263,12 @@ class MainHandler:
                 auth_result = await self.auth.sign_up(email, password, metadata)
                 
                 if auth_result.get("success"):
-                    # FIXED: More robust user profile creation with enhanced retry logic
+                    # ENHANCED: More robust user profile creation with enhanced retry logic
                     user_created_id = auth_result["user"]["id"]
                     print(f"🎉 User created with ID: {user_created_id}")
                     
                     try:
-                        # FIXED: Enhanced profile creation with multiple verification steps
+                        # ENHANCED: Enhanced profile creation with multiple verification steps
                         profile_created = False
                         max_attempts = 5  # Increased attempts
                         
@@ -259,7 +310,7 @@ class MainHandler:
                                 if profile_created:
                                     print(f"✅ User profile created successfully for: {email}")
                                     
-                                    # FIXED: Multiple verification attempts with delays
+                                    # ENHANCED: Multiple verification attempts with delays
                                     verification_success = False
                                     for verify_attempt in range(3):
                                         await asyncio.sleep(0.1 * (verify_attempt + 1))  # Progressive delay
@@ -288,14 +339,14 @@ class MainHandler:
                         
                         if not profile_created:
                             print(f"❌ Failed to create profile after {max_attempts} attempts for: {email}")
-                            # FIXED: Still return success for auth, but log the profile creation failure
+                            # ENHANCED: Still return success for auth, but log the profile creation failure
                             print(f"⚠️ User authentication succeeded but profile creation failed")
                             print(f"⚠️ Profile will be created during onboarding if needed")
                         else:
                             print(f"✅ Profile creation process completed successfully for: {email}")
                         
                     except Exception as profile_error:
-                        # FIXED: Don't fail signup if profile creation fails, but log it
+                        # ENHANCED: Don't fail signup if profile creation fails, but log it
                         print(f"⚠️ User profile creation error (non-critical): {profile_error}")
                         import traceback
                         traceback.print_exc()
@@ -426,11 +477,11 @@ class MainHandler:
     
     async def handle_user_status(self, event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         """
-        FIXED: Handle user status requests with ENHANCED debugging and error recovery
+        Handle user status requests with ENHANCED debugging and error recovery
         """
         
         try:
-            body = json.loads(event.get('body', '{}'))
+            body = self._extract_request_body(event)
             user_id = body.get('user_id')
             access_token = body.get('access_token')
             
@@ -449,7 +500,7 @@ class MainHandler:
             
             print(f"✅ Token verified successfully")
             
-            # FIXED: ENHANCED debugging and error recovery for user status
+            # ENHANCED: ENHANCED debugging and error recovery for user status
             print(f"🔍 Getting user status with enhanced debugging...")
             
             try:
