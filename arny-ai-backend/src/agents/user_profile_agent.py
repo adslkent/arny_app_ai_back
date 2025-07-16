@@ -1,5 +1,5 @@
 """
-User Profile Agent for Arny AI - ENHANCED VERSION
+User Profile Agent for Arny AI - ENHANCED VERSION WITHOUT TIMEOUTS
 
 This agent filters search results based on group preferences with optimizations
 to handle larger result sets efficiently. Features:
@@ -7,7 +7,7 @@ to handle larger result sets efficiently. Features:
 - Process up to 50 hotel results  
 - Return up to 10 filtered results
 - Ultra-short prompts for efficiency
-- Instant fallbacks for any delays
+- NO TIMEOUT LIMITS on AI processing
 - Cache results to prevent duplicate processing
 """
 
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 class UserProfileAgent:
     """
-    ENHANCED: User Profile Agent with support for larger result sets
+    ENHANCED: User Profile Agent with support for larger result sets - NO TIMEOUTS
     """
     
     def __init__(self):
@@ -39,7 +39,7 @@ class UserProfileAgent:
             # Initialize result cache for instant responses
             self._filter_cache = {}
             
-            logger.info("UserProfileAgent initialized with enhanced support for larger datasets")
+            logger.info("UserProfileAgent initialized with enhanced support for larger datasets - NO TIMEOUTS")
         except Exception as e:
             logger.error(f"Failed to initialize UserProfileAgent: {e}")
             raise Exception(f"UserProfileAgent initialization failed: {e}")
@@ -47,12 +47,12 @@ class UserProfileAgent:
     async def filter_flight_results(self, user_id: str, flight_results: List[Dict[str, Any]], 
                                   search_params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        ENHANCED: Filter flight results with support for up to 50 flights, returning up to 10
+        ENHANCED: Filter flight results with support for up to 50 flights, returning up to 10 - NO TIMEOUTS
         """
         try:
-            logger.info(f"ENHANCED flight filtering for user {user_id}")
+            logger.info(f"ENHANCED flight filtering for user {user_id} - NO TIMEOUTS")
             
-            print(f"🚀 ENHANCED: Processing {len(flight_results)} flight results")
+            print(f"🚀 ENHANCED: Processing {len(flight_results)} flight results - NO TIMEOUTS")
 
             # OPTIMIZATION 1: Check cache first
             cache_key = f"flight_{user_id}_{len(flight_results)}"
@@ -60,14 +60,11 @@ class UserProfileAgent:
                 print(f"⚡ CACHE HIT: Returning cached flight filtering")
                 return self._filter_cache[cache_key]
 
-            # OPTIMIZATION 2: Get group profiles with timeout
+            # OPTIMIZATION 2: Get group profiles - NO TIMEOUT LIMIT
             try:
-                group_profiles = await asyncio.wait_for(
-                    self._get_group_profiles(user_id), 
-                    timeout=3.0
-                )
-            except asyncio.TimeoutError:
-                print(f"⚠️ Group profile timeout - treating as single user")
+                group_profiles = await self._get_group_profiles(user_id)
+            except Exception as e:
+                print(f"⚠️ Group profile error: {e} - treating as single user")
                 group_profiles = []
             
             if not group_profiles:
@@ -86,12 +83,9 @@ class UserProfileAgent:
             
             print(f"⚡ Group filtering for {len(group_profiles)} members")
 
-            # ENHANCED: AI filtering with support for up to 50 flights
+            # ENHANCED: AI filtering with support for up to 50 flights - NO TIMEOUT LIMIT
             try:
-                filtered_results = await asyncio.wait_for(
-                    self._ai_filter_flights_enhanced(flight_results, group_profiles),
-                    timeout=8.0  # Increased timeout for larger datasets
-                )
+                filtered_results = await self._ai_filter_flights_enhanced(flight_results, group_profiles)
                 
                 recommended_flights = filtered_results.get("recommended_flights", flight_results[:10])
                 
@@ -100,7 +94,7 @@ class UserProfileAgent:
                     "original_count": len(flight_results),
                     "filtered_count": len(recommended_flights),
                     "filtering_applied": True,
-                    "rationale": filtered_results.get("filtering_rationale", "AI filtering applied (enhanced)"),
+                    "rationale": filtered_results.get("filtering_rationale", "AI filtering applied (enhanced - no timeouts)"),
                     "group_size": len(group_profiles),
                 }
                 
@@ -111,14 +105,14 @@ class UserProfileAgent:
                 print(f"🚀 ENHANCED filtering complete: {len(recommended_flights)} results")
                 return result
                 
-            except asyncio.TimeoutError:
-                print(f"⚠️ AI filtering timeout - using top 10 fallback")
+            except Exception as e:
+                print(f"⚠️ AI filtering error - using top 10 fallback: {e}")
                 result = {
                     "filtered_results": flight_results[:10],
                     "original_count": len(flight_results),
                     "filtered_count": min(10, len(flight_results)),
                     "filtering_applied": False,
-                    "rationale": "Enhanced fallback used (timeout prevention)"
+                    "rationale": f"Enhanced fallback used due to error: {str(e)}"
                 }
                 return result
             
@@ -136,12 +130,12 @@ class UserProfileAgent:
     async def filter_hotel_results(self, user_id: str, hotel_results: List[Dict[str, Any]], 
                                  search_params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        ENHANCED: Filter hotel results with support for up to 50 hotels, returning up to 10
+        ENHANCED: Filter hotel results with support for up to 50 hotels, returning up to 10 - NO TIMEOUTS
         """
         try:
-            logger.info(f"ENHANCED hotel filtering for user {user_id}")
+            logger.info(f"ENHANCED hotel filtering for user {user_id} - NO TIMEOUTS")
             
-            print(f"🚀 ENHANCED: Processing {len(hotel_results)} hotel results")
+            print(f"🚀 ENHANCED: Processing {len(hotel_results)} hotel results - NO TIMEOUTS")
 
             # OPTIMIZATION 1: Check cache first
             cache_key = f"hotel_{user_id}_{len(hotel_results)}"
@@ -149,14 +143,11 @@ class UserProfileAgent:
                 print(f"⚡ CACHE HIT: Returning cached hotel filtering")
                 return self._filter_cache[cache_key]
 
-            # OPTIMIZATION 2: Get group profiles with timeout
+            # OPTIMIZATION 2: Get group profiles - NO TIMEOUT LIMIT
             try:
-                group_profiles = await asyncio.wait_for(
-                    self._get_group_profiles(user_id), 
-                    timeout=3.0
-                )
-            except asyncio.TimeoutError:
-                print(f"⚠️ Group profile timeout - treating as single user")
+                group_profiles = await self._get_group_profiles(user_id)
+            except Exception as e:
+                print(f"⚠️ Group profile error: {e} - treating as single user")
                 group_profiles = []
             
             if not group_profiles:
@@ -175,12 +166,9 @@ class UserProfileAgent:
             
             print(f"⚡ Group filtering for {len(group_profiles)} members")
 
-            # ENHANCED: AI filtering with support for up to 50 hotels
+            # ENHANCED: AI filtering with support for up to 50 hotels - NO TIMEOUT LIMIT
             try:
-                filtered_results = await asyncio.wait_for(
-                    self._ai_filter_hotels_enhanced(hotel_results, group_profiles),
-                    timeout=8.0  # Increased timeout for larger datasets
-                )
+                filtered_results = await self._ai_filter_hotels_enhanced(hotel_results, group_profiles)
                 
                 recommended_hotels = filtered_results.get("recommended_hotels", hotel_results[:10])
                 
@@ -189,7 +177,7 @@ class UserProfileAgent:
                     "original_count": len(hotel_results),
                     "filtered_count": len(recommended_hotels),
                     "filtering_applied": True,
-                    "rationale": filtered_results.get("filtering_rationale", "AI filtering applied (enhanced)"),
+                    "rationale": filtered_results.get("filtering_rationale", "AI filtering applied (enhanced - no timeouts)"),
                     "group_size": len(group_profiles),
                 }
                 
@@ -200,14 +188,14 @@ class UserProfileAgent:
                 print(f"🚀 ENHANCED filtering complete: {len(recommended_hotels)} results")
                 return result
                 
-            except asyncio.TimeoutError:
-                print(f"⚠️ AI filtering timeout - using top 10 fallback")
+            except Exception as e:
+                print(f"⚠️ AI filtering error - using top 10 fallback: {e}")
                 result = {
                     "filtered_results": hotel_results[:10],
                     "original_count": len(hotel_results),
                     "filtered_count": min(10, len(hotel_results)),
                     "filtering_applied": False,
-                    "rationale": "Enhanced fallback used (timeout prevention)"
+                    "rationale": f"Enhanced fallback used due to error: {str(e)}"
                 }
                 return result
             
@@ -223,7 +211,7 @@ class UserProfileAgent:
             }
     
     async def _get_group_profiles(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get group profiles with optimized processing"""
+        """Get group profiles with optimized processing - NO TIMEOUTS"""
         try:
             # Get user's groups
             user_groups = await self.db.get_user_groups(user_id)
@@ -321,7 +309,7 @@ class UserProfileAgent:
     
     async def _ai_filter_flights_enhanced(self, flight_results: List[Dict[str, Any]], 
                                          group_profiles: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """ENHANCED: AI flight filtering with support for larger datasets"""
+        """ENHANCED: AI flight filtering with support for larger datasets - NO TIMEOUT LIMITS"""
         try:
             # Extract enhanced data for all flights
             enhanced_flights = self._extract_enhanced_flight_data(flight_results)
@@ -333,7 +321,7 @@ Return top 10 flights as JSON: {{"recommended_flights": [{{\"id\": 1}}, {{\"id\"
 
 Flights: {json.dumps(enhanced_flights[:20])}...and {max(0, len(enhanced_flights)-20)} more"""  # Show first 20 + count
 
-            # Make optimized OpenAI call
+            # Make optimized OpenAI call - NO TIMEOUT LIMITS
             response = self.openai_client.responses.create(
                 model="o4-mini",
                 input=prompt
@@ -391,7 +379,7 @@ Flights: {json.dumps(enhanced_flights[:20])}...and {max(0, len(enhanced_flights)
     
     async def _ai_filter_hotels_enhanced(self, hotel_results: List[Dict[str, Any]], 
                                         group_profiles: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """ENHANCED: AI hotel filtering with support for larger datasets"""
+        """ENHANCED: AI hotel filtering with support for larger datasets - NO TIMEOUT LIMITS"""
         try:
             # Extract enhanced data for all hotels
             enhanced_hotels = self._extract_enhanced_hotel_data(hotel_results)
@@ -403,7 +391,7 @@ Return top 10 hotels as JSON: {{"recommended_hotels": [{{\"id\": 1}}, {{\"id\": 
 
 Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20)} more"""  # Show first 20 + count
 
-            # Make optimized OpenAI call
+            # Make optimized OpenAI call - NO TIMEOUT LIMITS
             response = self.openai_client.responses.create(
                 model="o4-mini",
                 input=prompt
