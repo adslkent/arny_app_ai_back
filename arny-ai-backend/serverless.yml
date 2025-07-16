@@ -7,8 +7,8 @@ provider:
   runtime: python3.11
   region: us-east-1
   stage: ${opt:stage, 'dev'}
-  timeout: 29  # Match API Gateway's 29-second timeout limit
-  memorySize: 1024  # Increased memory for better performance (faster CPU + network)
+  timeout: 29  # Keep shorter for API Gateway functions
+  memorySize: 1024
   
   environment:
     STAGE: ${self:provider.stage}
@@ -43,15 +43,15 @@ custom:
   pythonRequirements:
     dockerizePip: true
     layer: true
-    slim: true  # Reduce package size for faster cold starts
+    slim: true
     strip: false
 
 functions:
   # Authentication functions - keep shorter timeout since auth operations are quick
   auth:
     handler: src/main.lambda_handler
-    timeout: 15  # Auth operations are typically fast
-    memorySize: 512  # Less memory needed for auth
+    timeout: 15
+    memorySize: 512
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
     events:
@@ -75,8 +75,8 @@ functions:
   # Onboarding functions - may need more time for email scanning and AI processing
   onboarding:
     handler: src/main.lambda_handler
-    timeout: 29  # Match API Gateway's 29-second timeout limit
-    memorySize: 1024  # More memory for AI operations
+    timeout: 29
+    memorySize: 1024
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
     events:
@@ -97,28 +97,39 @@ functions:
           method: post
           cors: true
 
-  # Main travel chat functions - need maximum time for AI processing and API calls
+  # MODIFIED: Main travel chat function with Function URL ONLY (15-minute timeout)
   travel:
     handler: src/main.lambda_handler
-    timeout: 29  # Match API Gateway's 29-second timeout limit
-    memorySize: 1024  # More memory for AI processing and API calls
+    timeout: 900  # 15 minutes for Function URL (max allowed)
+    memorySize: 1536  # Increased memory for better performance
+    reservedConcurrency: 10  # Reserve capacity to reduce cold starts
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
-    events:
-      - http:
-          path: /chat
-          method: post
-          cors: true
-      - http:
-          path: /travel/chat
-          method: post
-          cors: true
+    # Function URL configuration - NO API Gateway events
+    url:
+      cors:
+        allowCredentials: false
+        allowHeaders:
+          - Content-Type
+          - X-Amz-Date
+          - Authorization
+          - X-Api-Key
+          - X-Amz-Security-Token
+        allowMethods:
+          - POST
+          - OPTIONS
+        allowOrigins:
+          - '*'
+        exposeHeaders:
+          - Content-Type
+        maxAge: 86400
+    # NO API Gateway events - Function URL only
 
   # User management functions - quick operations
   user:
     handler: src/main.lambda_handler
-    timeout: 10  # User status checks are fast
-    memorySize: 512  # Less memory needed
+    timeout: 10
+    memorySize: 512
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
     events:
@@ -134,8 +145,8 @@ functions:
   # Health check function - very quick
   health:
     handler: src/main.lambda_handler
-    timeout: 10  # Health checks should be fast
-    memorySize: 256  # Minimal memory needed
+    timeout: 10
+    memorySize: 256
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
     events:
@@ -201,6 +212,11 @@ resources:
             - '.amazonaws.com/'
             - ${self:provider.stage}
     
+    TravelFunctionUrl:
+      Description: Direct Lambda Function URL for ALL travel chat (up to 15 minutes timeout)
+      Value:
+        Fn::GetAtt: TravelLambdaFunctionUrl.FunctionUrl
+    
     AuthEndpoint:
       Description: Authentication endpoint
       Value:
@@ -228,14 +244,6 @@ resources:
             - '/onboarding'
     
     TravelEndpoint:
-      Description: Travel chat endpoint
+      Description: Travel chat endpoint (Function URL ONLY - 15 min timeout)
       Value:
-        Fn::Join:
-          - ''
-          - - 'https://'
-            - Ref: ApiGatewayRestApi
-            - '.execute-api.'
-            - ${self:provider.region}
-            - '.amazonaws.com/'
-            - ${self:provider.stage}
-            - '/travel'
+        Fn::GetAtt: TravelLambdaFunctionUrl.FunctionUrl
