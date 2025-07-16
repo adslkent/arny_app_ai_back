@@ -173,7 +173,7 @@ def search_flights_tool(origin: str, destination: str, departure_date: str,
         
         print(f"✅ Converted codes: {origin_code} → {destination_code}")
         
-        # Perform flight search using the safe async runner
+        # Perform flight search using the safe async runner - INCREASED FROM 12 TO 50
         print(f"🛫 Calling Amadeus API...")
         search_results = _run_async_safely(
             agent.amadeus_service.search_flights(
@@ -183,7 +183,7 @@ def search_flights_tool(origin: str, destination: str, departure_date: str,
                 return_date=return_date,
                 adults=adults,
                 cabin_class=cabin_class,
-                max_results=12  # Get more results for better filtering
+                max_results=50  # CHANGED: Increased from 12 to 50 results
             )
         )
         
@@ -208,11 +208,11 @@ def search_flights_tool(origin: str, destination: str, departure_date: str,
         }
         
         print(f"🔧 Applying profile filtering...")
-        # Filter results based on group profiles
+        # Filter results based on group profiles - SENDING ALL 50 FLIGHTS
         filtering_result = _run_async_safely(
             agent.profile_agent.filter_flight_results(
                 user_id=agent.current_user_id,
-                flight_results=search_results["results"],
+                flight_results=search_results["results"],  # CHANGED: Send all flights (up to 50)
                 search_params=search_params
             )
         )
@@ -658,7 +658,8 @@ Always respond in English. When presenting flight information, use clear formatt
         
         formatted += f"I found {len(results)} flights from {origin} to {destination} on {departure_date}:\n\n"
         
-        for i, flight in enumerate(results[:5], 1):  # Show top 5 results
+        # CHANGED: Show up to 10 results instead of 5
+        for i, flight in enumerate(results[:10], 1):  # CHANGED: Show top 10 results instead of 5
             price = flight.get("price", {})
             total_price = price.get("total", "N/A")
             currency = price.get("currency", "")
@@ -688,8 +689,9 @@ Always respond in English. When presenting flight information, use clear formatt
                     formatted += f"• Duration: {duration}\n"
                     formatted += f"• Price: {currency} {total_price}\n\n"
         
-        if len(results) > 5:
-            formatted += f"... and {len(results) - 5} more options available.\n\n"
+        # CHANGED: Update the "more options" message for 10 instead of 5
+        if len(results) > 10:
+            formatted += f"... and {len(results) - 10} more options available.\n\n"
         
         # Add group filtering note if applicable
         if filtering_info.get("filtering_applied") and filtering_info.get("group_size", 1) > 1:
