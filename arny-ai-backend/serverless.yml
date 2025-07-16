@@ -102,27 +102,12 @@ functions:
     handler: src/main.lambda_handler
     timeout: 900  # 15 minutes for Function URL (max allowed)
     memorySize: 1536  # Increased memory for better performance
-    reservedConcurrency: 10  # Reserve capacity to reduce cold starts
+    # REMOVED: reservedConcurrency to avoid account limit issues
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
     # Function URL configuration - NO API Gateway events
     url:
-      cors:
-        allowCredentials: false
-        allowHeaders:
-          - Content-Type
-          - X-Amz-Date
-          - Authorization
-          - X-Api-Key
-          - X-Amz-Security-Token
-        allowMethods:
-          - POST
-          - OPTIONS
-        allowOrigins:
-          - '*'
-        exposeHeaders:
-          - Content-Type
-        maxAge: 86400
+      cors: true  # Simplified CORS configuration
     # NO API Gateway events - Function URL only
 
   # User management functions - quick operations
