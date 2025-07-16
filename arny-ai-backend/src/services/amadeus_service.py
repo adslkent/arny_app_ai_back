@@ -5,7 +5,7 @@ import logging
 from ..utils.config import config
 
 class AmadeusService:
-    """Service for interacting with Amadeus APIs for flights and hotels"""
+    """Service for interacting with Amadeus APIs for flights and hotels - ENHANCED VERSION"""
     
     def __init__(self):
         self.client = Client(
@@ -19,9 +19,9 @@ class AmadeusService:
     
     async def search_flights(self, origin: str, destination: str, departure_date: str, 
                            return_date: Optional[str] = None, adults: int = 1, 
-                           cabin_class: str = "ECONOMY", max_results: int = 10) -> Dict[str, Any]:
+                           cabin_class: str = "ECONOMY", max_results: int = 50) -> Dict[str, Any]:
         """
-        Search for flights using Amadeus Flight Offers Search API
+        Search for flights using Amadeus Flight Offers Search API - ENHANCED VERSION
         
         Args:
             origin: Origin airport/city code (e.g., 'SYD')
@@ -30,7 +30,7 @@ class AmadeusService:
             return_date: Return date in YYYY-MM-DD format (optional for one-way)
             adults: Number of adult passengers
             cabin_class: Cabin class (ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST)
-            max_results: Maximum number of results to return
+            max_results: Maximum number of results to return (CHANGED: default now 50)
             
         Returns:
             Dictionary containing flight search results or error
@@ -42,7 +42,7 @@ class AmadeusService:
                 'destinationLocationCode': destination,
                 'departureDate': departure_date,
                 'adults': adults,
-                'max': max_results,
+                'max': max_results,  # CHANGED: Can now handle up to 50 results
                 'travelClass': cabin_class
             }
             
@@ -187,9 +187,9 @@ class AmadeusService:
     # ==================== HOTEL OPERATIONS ====================
     
     async def search_hotels(self, city_code: str, check_in_date: str, check_out_date: str,
-                          adults: int = 1, rooms: int = 1, max_results: int = 20) -> Dict[str, Any]:
+                          adults: int = 1, rooms: int = 1, max_results: int = 50) -> Dict[str, Any]:
         """
-        Search for hotels using Amadeus Hotel Search API
+        Search for hotels using Amadeus Hotel Search API - ENHANCED VERSION
         
         Args:
             city_code: City code (e.g., 'SYD' for Sydney)
@@ -197,7 +197,7 @@ class AmadeusService:
             check_out_date: Check-out date in YYYY-MM-DD format
             adults: Number of adults
             rooms: Number of rooms
-            max_results: Maximum number of results
+            max_results: Maximum number of results (CHANGED: default now 50)
             
         Returns:
             Dictionary containing hotel search results or error
@@ -214,7 +214,7 @@ class AmadeusService:
                     "error": f"No hotels found for city code: {city_code}"
                 }
             
-            # Extract hotel IDs (limit to max_results for offers search)
+            # Extract hotel IDs (ENHANCED: limit to max_results for offers search)
             hotel_ids = [hotel['hotelId'] for hotel in hotels_response.data[:max_results]]
             
             # Search for hotel offers
@@ -357,3 +357,61 @@ class AmadeusService:
         except Exception as e:
             self.logger.error(f"Error formatting hotel offer: {e}")
             return hotel_data  # Return original if formatting fails
+    
+    # ==================== ADDITIONAL FLIGHT OPERATIONS ====================
+    
+    async def search_airports(self, keyword: str, subtype: str = "AIRPORT") -> List[Dict[str, Any]]:
+        """
+        Search for airports using Amadeus Airport & City Search API
+        
+        Args:
+            keyword: Search keyword (city name, airport code, etc.)
+            subtype: Location subtype (AIRPORT, CITY)
+            
+        Returns:
+            List of airport/location data
+        """
+        try:
+            response = self.client.reference_data.locations.get(
+                keyword=keyword,
+                subType=subtype
+            )
+            
+            if hasattr(response, 'data') and response.data:
+                return response.data
+            else:
+                return []
+                
+        except ResponseError as e:
+            self.logger.error(f"Amadeus API error in airport search: {e}")
+            return []
+        except Exception as e:
+            self.logger.error(f"Unexpected error in airport search: {e}")
+            return []
+    
+    async def get_flight_checkin_links(self, airline_code: str) -> List[Dict[str, Any]]:
+        """
+        Get flight check-in links for an airline
+        
+        Args:
+            airline_code: IATA airline code (e.g., 'LH')
+            
+        Returns:
+            List of check-in link data
+        """
+        try:
+            response = self.client.reference_data.urls.checkin_links.get(
+                airlineCode=airline_code
+            )
+            
+            if hasattr(response, 'data') and response.data:
+                return response.data
+            else:
+                return []
+                
+        except ResponseError as e:
+            self.logger.error(f"Amadeus API error in check-in links: {e}")
+            return []
+        except Exception as e:
+            self.logger.error(f"Unexpected error in check-in links: {e}")
+            return []
