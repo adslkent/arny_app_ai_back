@@ -1,11 +1,11 @@
 """
-Hotel Search Agent Module - TIMEOUT REMOVED VERSION to match flight agent
+Hotel Search Agent Module - ENHANCED VERSION to match flight agent improvements
 
-This module provides a hotel search agent without timeout protections:
-1. No timeout limits on Amadeus API calls  
-2. No timeout limits on profile filtering
-3. No timeout limits on agent processing
-4. Works similarly to the flight agent
+This module provides a hotel search agent with enhanced capabilities:
+1. Support for up to 50 hotel results from Amadeus API
+2. Send all hotels to OpenAI for filtering
+3. Return up to 10 filtered hotel results
+4. Optimized for larger datasets
 
 Usage example:
 ```python
@@ -37,7 +37,7 @@ from .user_profile_agent import UserProfileAgent
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# ===== ULTRA-OPTIMIZED City Code Mapping =====
+# ===== ENHANCED City Code Mapping =====
 CITY_CODE_MAPPING = {
     "london": "LON", "paris": "PAR", "newyork": "NYC", "new york": "NYC",
     "tokyo": "TYO", "beijing": "PEK", "shanghai": "SHA", "hongkong": "HKG",
@@ -86,16 +86,16 @@ def _run_in_new_loop(coro):
 
 def get_hotel_system_message() -> str:
     """
-    Generate ultra-optimized hotel search assistant system prompt
+    Generate enhanced hotel search assistant system prompt
     """
     # Get current date
     today = datetime.now().strftime("%Y-%m-%d")
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
     
-    # Ultra-short system message to reduce processing time
-    system_message = f"""You are Arny's hotel search assistant. Today is {today}.
+    # Enhanced system message for better hotel search
+    system_message = f"""You are Arny's professional hotel search assistant. Today is {today}.
 
-Your task: Use search_hotels_tool to find hotels with dates and pricing.
+Your task: Use search_hotels_tool to find hotels with dates and pricing for users.
 
 Key rules:
 1. ALWAYS use search_hotels_tool for ANY hotel request with dates
@@ -103,10 +103,11 @@ Key rules:
 3. Convert city names to codes: NYC, LON, PAR, etc.
 4. DEFAULT: adults=1, rooms=1
 5. NEVER call the same tool twice with different city variations
+6. Present results clearly with hotel names, ratings, and prices
 
 Example: "Hotels in New York July 15-18" → search_hotels_tool(destination="New York", check_in_date="2025-07-15", check_out_date="2025-07-18")
 
-Be fast and efficient. One tool call per request."""
+Be professional and helpful. Provide comprehensive hotel options."""
     
     return system_message
 
@@ -114,7 +115,7 @@ Be fast and efficient. One tool call per request."""
 async def search_hotels_tool(destination: str, check_in_date: str, check_out_date: Optional[str] = None,
                             adults: int = 1, rooms: int = 1) -> dict:
     """
-    Search for hotels - NO TIMEOUT PROTECTION (matching flight agent pattern)
+    Search for hotels - ENHANCED VERSION with support for larger datasets
     
     Args:
         destination: Destination city (e.g., 'Sydney', 'NYC')
@@ -127,7 +128,7 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
         Dict with hotel search results and profile filtering information
     """
     
-    print(f"🚀 Hotel search started for {destination}")
+    print(f"🚀 ENHANCED Hotel search started for {destination}")
     start_time = datetime.now()
     
     try:
@@ -147,11 +148,11 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
         
         print(f"🔍 Processing: {destination} for {check_in_date} to {check_out_date}")
         
-        # OPTIMIZATION 3: Ultra-fast city code conversion
-        city_code = hotel_agent._convert_to_city_code_ultra_fast(destination)
-        print(f"⚡ Fast conversion: {destination} → {city_code}")
+        # OPTIMIZATION 3: Enhanced city code conversion
+        city_code = hotel_agent._convert_to_city_code_enhanced(destination)
+        print(f"⚡ Enhanced conversion: {destination} → {city_code}")
         
-        # OPTIMIZATION 4: Handle default check-out date instantly
+        # OPTIMIZATION 4: Handle default check-out date
         if not check_out_date:
             try:
                 check_in_dt = datetime.strptime(check_in_date, "%Y-%m-%d")
@@ -164,7 +165,7 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
                     "message": "Please provide check-in date in YYYY-MM-DD format"
                 }
         
-        # REMOVED TIMEOUT: Direct Amadeus API call (matching flight agent pattern)
+        # ENHANCED: Amadeus API call with increased result limit
         print(f"🏨 Calling Amadeus API...")
         
         search_results = _run_async_safely(
@@ -174,7 +175,7 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
                 check_out_date=check_out_date,
                 adults=adults,
                 rooms=rooms,
-                max_results=6  # Limit to 6 for speed
+                max_results=50  # CHANGED: Increased from 6 to 50 results
             )
         )
         
@@ -188,7 +189,7 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
                 "message": f"Sorry, I couldn't find hotels in {destination} for {check_in_date} to {check_out_date}."
             }
         
-        # REMOVED TIMEOUT: Direct profile filtering (matching flight agent pattern)
+        # ENHANCED: Profile filtering with all results
         search_params = {
             "city_code": city_code,
             "destination": destination,
@@ -198,19 +199,19 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
             "rooms": rooms
         }
         
-        print(f"🔧 Profile filtering...")
+        print(f"🔧 Profile filtering with enhanced dataset...")
         
         filtering_result = _run_async_safely(
             hotel_agent.profile_agent.filter_hotel_results(
                 user_id=hotel_agent.current_user_id,
-                hotel_results=search_results["results"],
+                hotel_results=search_results["results"],  # CHANGED: Send all hotels (up to 50)
                 search_params=search_params
             )
         )
         
         print(f"✅ Filtering complete: {filtering_result['filtered_count']} of {filtering_result['original_count']} results")
         
-        # OPTIMIZATION 7: Ultra-fast database save (no await)
+        # OPTIMIZATION 7: Enhanced database save
         hotel_search = HotelSearch(
             id=str(uuid.uuid4()),
             user_id=hotel_agent.current_user_id,
@@ -219,13 +220,13 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
             check_out_date=check_out_date,
             adults=adults,
             rooms=rooms,
-            search_results=search_results["results"],
+            search_results=search_results["results"],  # Save original results
             result_count=len(filtering_result["filtered_results"]),
             search_successful=True
         )
         
-        print(f"💾 Saving search to database (async)...")
-        # Save asynchronously without waiting
+        print(f"💾 Saving search to database...")
+        # Save asynchronously for better performance
         asyncio.create_task(hotel_agent.db.save_hotel_search(hotel_search))
         
         # OPTIMIZATION 8: Store search results on agent instance
@@ -239,7 +240,7 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
             "rationale": filtering_result["rationale"]
         }
         
-        # OPTIMIZATION 9: Create result payload
+        # OPTIMIZATION 9: Create enhanced result payload
         result_payload = {
             "success": True,
             "results": filtering_result["filtered_results"],
@@ -253,13 +254,13 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
             hotel_agent._search_cache = {}
         hotel_agent._search_cache[search_key] = result_payload
         
-        # Keep cache small (max 10 entries)
+        # Keep cache manageable (max 10 entries)
         if len(hotel_agent._search_cache) > 10:
             oldest_key = list(hotel_agent._search_cache.keys())[0]
             del hotel_agent._search_cache[oldest_key]
         
         elapsed_time = (datetime.now() - start_time).total_seconds()
-        print(f"✅ Hotel search completed in {elapsed_time:.2f}s!")
+        print(f"✅ ENHANCED Hotel search completed in {elapsed_time:.2f}s!")
         
         return result_payload
         
@@ -271,155 +272,4 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
         return {
             "success": False,
             "error": str(e),
-            "message": f"I encountered an error searching for hotels: {str(e)}"
-        }
-
-class HotelAgent:
-    """
-    Hotel agent without timeout protections (matching flight agent)
-    """
-    
-    def __init__(self):
-        global _current_hotel_agent
-        
-        self.openai_client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
-        self.amadeus_service = AmadeusService()
-        self.db = DatabaseOperations()
-        self.profile_agent = UserProfileAgent()
-        
-        # Initialize context variables
-        self.current_user_id = None
-        self.current_session_id = None
-        self.user_profile = None
-        
-        # Initialize search result storage
-        self.latest_search_results = []
-        self.latest_search_id = None
-        self.latest_filtering_info = {}
-        
-        # Initialize search cache for ultra-fast responses
-        self._search_cache = {}
-        
-        # Set this instance as the global instance for tools
-        _current_hotel_agent = self
-        
-        # Create the agent with optimized settings
-        self.agent = Agent(
-            name="Arny Hotel Assistant", 
-            instructions=get_hotel_system_message(),
-            model="gpt-4o-mini",  # Use faster model
-            tools=[search_hotels_tool]
-        )
-    
-    async def process_message(self, user_id: str, message: str, session_id: str,
-                             user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
-        """
-        Process hotel search requests - NO TIMEOUT PROTECTION (matching flight agent)
-        """
-        
-        try:
-            print(f"🏨 HotelAgent processing: '{message[:50]}...'")
-            start_time = datetime.now()
-            
-            # Clear previous search results
-            self.latest_search_results = []
-            self.latest_search_id = None
-            self.latest_filtering_info = {}
-            
-            # Store context for tool calls
-            self.current_user_id = user_id
-            self.current_session_id = session_id
-            self.user_profile = user_profile
-            
-            # Update the global instance
-            global _current_hotel_agent
-            _current_hotel_agent.current_user_id = user_id
-            _current_hotel_agent.current_session_id = session_id
-            _current_hotel_agent.user_profile = user_profile
-            _current_hotel_agent.latest_search_results = []
-            _current_hotel_agent.latest_search_id = None
-            _current_hotel_agent.latest_filtering_info = {}
-            
-            print(f"🔧 Context set: user_id={user_id}")
-            
-            # Build minimal conversation context (last 5 messages only)
-            context_messages = []
-            for msg in conversation_history[-5:]:
-                context_messages.append({
-                    "role": msg.message_type,
-                    "content": msg.content
-                })
-            
-            print(f"🔧 Processing with {len(context_messages)} previous messages")
-            
-            # REMOVED TIMEOUT: Direct agent processing (matching flight agent pattern)
-            if not context_messages:
-                # First message in conversation
-                print("🚀 Starting new hotel conversation")
-                result = await Runner.run(self.agent, message)
-            else:
-                # Continue conversation with context
-                print("🔄 Continuing hotel conversation with context")
-                result = await Runner.run(self.agent, context_messages + [{"role": "user", "content": message}])
-            
-            # Extract response
-            assistant_message = result.final_output
-            
-            # Get search results from global instance
-            global_agent = _get_hotel_agent()
-            search_results = global_agent.latest_search_results if global_agent else []
-            search_id = global_agent.latest_search_id if global_agent else None
-            filtering_info = global_agent.latest_filtering_info if global_agent else {}
-            
-            elapsed_time = (datetime.now() - start_time).total_seconds()
-            print(f"✅ HotelAgent completed in {elapsed_time:.2f}s")
-            print(f"📊 Retrieved search data: {len(search_results)} results, search_id: {search_id}")
-            
-            return {
-                "message": assistant_message,
-                "agent_type": "hotel",
-                "requires_action": False,
-                "search_results": search_results,
-                "search_id": search_id,
-                "filtering_info": filtering_info,
-                "metadata": {
-                    "agent_type": "hotel",
-                    "conversation_type": "hotel_search",
-                    "processing_time": elapsed_time
-                }
-            }
-        
-        except Exception as e:
-            print(f"❌ Error in hotel agent: {e}")
-            import traceback
-            traceback.print_exc()
-            return {
-                "message": "I'm sorry, I encountered an error while searching for hotels. Please try again.",
-                "agent_type": "hotel",
-                "error": str(e),
-                "requires_action": False,
-                "search_results": [],
-                "search_id": None,
-                "filtering_info": {}
-            }
-    
-    def _convert_to_city_code_ultra_fast(self, location: str) -> str:
-        """ULTRA-OPTIMIZED: Ultra-fast city code conversion"""
-        
-        location_lower = location.lower().strip().replace(" ", "")
-        
-        # Direct lookup in optimized mapping
-        if location_lower in CITY_CODE_MAPPING:
-            return CITY_CODE_MAPPING[location_lower]
-        
-        # Try with spaces for exact matches
-        location_lower_with_spaces = location.lower().strip()
-        if location_lower_with_spaces in CITY_CODE_MAPPING:
-            return CITY_CODE_MAPPING[location_lower_with_spaces]
-        
-        # If already looks like city code (3 letters)
-        if len(location) == 3 and location.isalpha():
-            return location.upper()
-        
-        # Default: return as-is
-        return location.upper()
+            "message": f"I
