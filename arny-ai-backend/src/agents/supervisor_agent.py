@@ -8,7 +8,7 @@ from .hotel_agent import HotelAgent
 
 class SupervisorAgent:
     """
-    ULTRA-OPTIMIZED: Supervisor agent with fast routing and timeout prevention
+    ENHANCED: Supervisor agent with fast routing and NO TIMEOUT LIMITS
     """
     
     def __init__(self):
@@ -21,7 +21,7 @@ class SupervisorAgent:
     async def process_message(self, user_id: str, message: str, session_id: str,
                             user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
         """
-        ULTRA-OPTIMIZED: Process user message with ultra-fast routing
+        ENHANCED: Process user message with ultra-fast routing and NO TIMEOUT LIMITS
         """
         
         try:
@@ -45,7 +45,7 @@ class SupervisorAgent:
                 )
             else:
                 print("💬 Handling as general conversation")
-                return await self._handle_general_conversation_fast(
+                return await self._handle_general_conversation_no_timeout(
                     user_id, message, session_id, user_profile, conversation_history
                 )
         
@@ -93,14 +93,14 @@ class SupervisorAgent:
         else:
             return "general"
     
-    async def _handle_general_conversation_fast(self, user_id: str, message: str, session_id: str,
-                                             user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
+    async def _handle_general_conversation_no_timeout(self, user_id: str, message: str, session_id: str,
+                                                    user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
         """
-        ULTRA-OPTIMIZATION: Fast general conversation with 5s timeout
+        ENHANCED: Fast general conversation with NO TIMEOUT LIMITS
         """
         
         try:
-            print(f"💬 Fast general conversation")
+            print(f"💬 Fast general conversation - NO TIMEOUT LIMITS")
             
             # Build minimal context
             user_context = ""
@@ -117,25 +117,9 @@ class SupervisorAgent:
 For specific searches, ask users to request "flights" or "hotels" with dates and destinations.
 Keep responses friendly and brief."""
 
-            # OPTIMIZATION: 5-second timeout on OpenAI call
+            # ENHANCED: Direct OpenAI call with NO TIMEOUT LIMITS
             try:
-                timeout_task = asyncio.create_task(asyncio.sleep(5))
-                openai_task = asyncio.create_task(self._make_openai_call_fast(system_prompt, message))
-                
-                done, pending = await asyncio.wait(
-                    [timeout_task, openai_task],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-                
-                # Cancel pending tasks
-                for task in pending:
-                    task.cancel()
-                
-                if openai_task in done:
-                    assistant_message = openai_task.result()
-                else:
-                    print(f"⚠️ OpenAI call timed out after 5s")
-                    assistant_message = "I'm here to help with your travel planning! You can ask me to search for flights or hotels with your travel dates."
+                assistant_message = await self._make_openai_call_no_timeout(system_prompt, message)
                     
             except Exception as openai_error:
                 print(f"⚠️ OpenAI error: {openai_error}")
@@ -164,10 +148,10 @@ Keep responses friendly and brief."""
                 }
             }
     
-    async def _make_openai_call_fast(self, system_prompt: str, user_message: str) -> str:
-        """ULTRA-FAST: Make OpenAI call for general conversation"""
+    async def _make_openai_call_no_timeout(self, system_prompt: str, user_message: str) -> str:
+        """ENHANCED: Make OpenAI call for general conversation with NO TIMEOUT LIMITS"""
         
-        # Use ultra-short prompt for speed
+        # Use ultra-short prompt for efficiency
         input_prompt = f"""System: {system_prompt}
 
 User: {user_message}
