@@ -1,5 +1,5 @@
 """
-User Profile Agent for Arny AI - ENHANCED VERSION WITHOUT TIMEOUTS
+User Profile Agent for Arny AI - ENHANCED VERSION WITHOUT TIMEOUTS AND MEMBER LIMITS
 
 This agent filters search results based on group preferences with optimizations
 to handle larger result sets efficiently. Features:
@@ -8,6 +8,7 @@ to handle larger result sets efficiently. Features:
 - Return up to 10 filtered results
 - Ultra-short prompts for efficiency
 - NO TIMEOUT LIMITS on AI processing
+- NO LIMITS on group member processing
 - Cache results to prevent duplicate processing
 """
 
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 class UserProfileAgent:
     """
-    ENHANCED: User Profile Agent with support for larger result sets - NO TIMEOUTS
+    ENHANCED: User Profile Agent with support for larger result sets - NO TIMEOUTS OR MEMBER LIMITS
     """
     
     def __init__(self):
@@ -39,7 +40,7 @@ class UserProfileAgent:
             # Initialize result cache for instant responses
             self._filter_cache = {}
             
-            logger.info("UserProfileAgent initialized with enhanced support for larger datasets - NO TIMEOUTS")
+            logger.info("UserProfileAgent initialized with enhanced support for larger datasets - NO TIMEOUTS OR MEMBER LIMITS")
         except Exception as e:
             logger.error(f"Failed to initialize UserProfileAgent: {e}")
             raise Exception(f"UserProfileAgent initialization failed: {e}")
@@ -47,12 +48,12 @@ class UserProfileAgent:
     async def filter_flight_results(self, user_id: str, flight_results: List[Dict[str, Any]], 
                                   search_params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        ENHANCED: Filter flight results with support for up to 50 flights, returning up to 10 - NO TIMEOUTS
+        ENHANCED: Filter flight results with support for up to 50 flights, returning up to 10 - NO TIMEOUTS OR MEMBER LIMITS
         """
         try:
-            logger.info(f"ENHANCED flight filtering for user {user_id} - NO TIMEOUTS")
+            logger.info(f"ENHANCED flight filtering for user {user_id} - NO TIMEOUTS OR MEMBER LIMITS")
             
-            print(f"🚀 ENHANCED: Processing {len(flight_results)} flight results - NO TIMEOUTS")
+            print(f"🚀 ENHANCED: Processing {len(flight_results)} flight results - NO TIMEOUTS OR MEMBER LIMITS")
 
             # OPTIMIZATION 1: Check cache first
             cache_key = f"flight_{user_id}_{len(flight_results)}"
@@ -60,7 +61,7 @@ class UserProfileAgent:
                 print(f"⚡ CACHE HIT: Returning cached flight filtering")
                 return self._filter_cache[cache_key]
 
-            # OPTIMIZATION 2: Get group profiles - NO TIMEOUT LIMIT
+            # OPTIMIZATION 2: Get group profiles - NO TIMEOUT LIMIT, ALL MEMBERS
             try:
                 group_profiles = await self._get_group_profiles(user_id)
             except Exception as e:
@@ -81,7 +82,7 @@ class UserProfileAgent:
                 self._filter_cache[cache_key] = result
                 return result
             
-            print(f"⚡ Group filtering for {len(group_profiles)} members")
+            print(f"⚡ Group filtering for ALL {len(group_profiles)} members (no limits)")
 
             # ENHANCED: AI filtering with support for up to 50 flights - NO TIMEOUT LIMIT
             try:
@@ -94,7 +95,7 @@ class UserProfileAgent:
                     "original_count": len(flight_results),
                     "filtered_count": len(recommended_flights),
                     "filtering_applied": True,
-                    "rationale": filtered_results.get("filtering_rationale", "AI filtering applied (enhanced - no timeouts)"),
+                    "rationale": filtered_results.get("filtering_rationale", "AI filtering applied (enhanced - no timeouts or member limits)"),
                     "group_size": len(group_profiles),
                 }
                 
@@ -102,7 +103,7 @@ class UserProfileAgent:
                 self._filter_cache[cache_key] = result
                 self._cleanup_cache()
                 
-                print(f"🚀 ENHANCED filtering complete: {len(recommended_flights)} results")
+                print(f"🚀 ENHANCED filtering complete: {len(recommended_flights)} results for {len(group_profiles)} members")
                 return result
                 
             except Exception as e:
@@ -130,12 +131,12 @@ class UserProfileAgent:
     async def filter_hotel_results(self, user_id: str, hotel_results: List[Dict[str, Any]], 
                                  search_params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        ENHANCED: Filter hotel results with support for up to 50 hotels, returning up to 10 - NO TIMEOUTS
+        ENHANCED: Filter hotel results with support for up to 50 hotels, returning up to 10 - NO TIMEOUTS OR MEMBER LIMITS
         """
         try:
-            logger.info(f"ENHANCED hotel filtering for user {user_id} - NO TIMEOUTS")
+            logger.info(f"ENHANCED hotel filtering for user {user_id} - NO TIMEOUTS OR MEMBER LIMITS")
             
-            print(f"🚀 ENHANCED: Processing {len(hotel_results)} hotel results - NO TIMEOUTS")
+            print(f"🚀 ENHANCED: Processing {len(hotel_results)} hotel results - NO TIMEOUTS OR MEMBER LIMITS")
 
             # OPTIMIZATION 1: Check cache first
             cache_key = f"hotel_{user_id}_{len(hotel_results)}"
@@ -143,7 +144,7 @@ class UserProfileAgent:
                 print(f"⚡ CACHE HIT: Returning cached hotel filtering")
                 return self._filter_cache[cache_key]
 
-            # OPTIMIZATION 2: Get group profiles - NO TIMEOUT LIMIT
+            # OPTIMIZATION 2: Get group profiles - NO TIMEOUT LIMIT, ALL MEMBERS
             try:
                 group_profiles = await self._get_group_profiles(user_id)
             except Exception as e:
@@ -164,7 +165,7 @@ class UserProfileAgent:
                 self._filter_cache[cache_key] = result
                 return result
             
-            print(f"⚡ Group filtering for {len(group_profiles)} members")
+            print(f"⚡ Group filtering for ALL {len(group_profiles)} members (no limits)")
 
             # ENHANCED: AI filtering with support for up to 50 hotels - NO TIMEOUT LIMIT
             try:
@@ -177,7 +178,7 @@ class UserProfileAgent:
                     "original_count": len(hotel_results),
                     "filtered_count": len(recommended_hotels),
                     "filtering_applied": True,
-                    "rationale": filtered_results.get("filtering_rationale", "AI filtering applied (enhanced - no timeouts)"),
+                    "rationale": filtered_results.get("filtering_rationale", "AI filtering applied (enhanced - no timeouts or member limits)"),
                     "group_size": len(group_profiles),
                 }
                 
@@ -185,7 +186,7 @@ class UserProfileAgent:
                 self._filter_cache[cache_key] = result
                 self._cleanup_cache()
                 
-                print(f"🚀 ENHANCED filtering complete: {len(recommended_hotels)} results")
+                print(f"🚀 ENHANCED filtering complete: {len(recommended_hotels)} results for {len(group_profiles)} members")
                 return result
                 
             except Exception as e:
@@ -211,7 +212,7 @@ class UserProfileAgent:
             }
     
     async def _get_group_profiles(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get group profiles with optimized processing - NO TIMEOUTS"""
+        """Get group profiles with optimized processing - NO TIMEOUTS OR MEMBER LIMITS"""
         try:
             # Get user's groups
             user_groups = await self.db.get_user_groups(user_id)
@@ -225,16 +226,17 @@ class UserProfileAgent:
             # Get group members
             group_members = await self.db.get_group_members(primary_group)
             
-            # Get profiles (max 5 members for efficiency)
+            # CHANGED: Get profiles for ALL members (removed limit of 5)
             group_profiles = []
-            for member in group_members[:5]:  # Limit to 5 for efficiency
+            for member in group_members:  # CHANGED: Process ALL members, no [:5] limit
                 profile = await self.db.get_user_profile(member.user_id)
                 if profile:
                     profile_dict = profile.dict()
                     profile_dict["group_role"] = member.role
                     group_profiles.append(profile_dict)
             
-            logger.info(f"Found {len(group_profiles)} profiles in group")
+            logger.info(f"Found {len(group_profiles)} profiles in group (ALL members processed)")
+            print(f"📊 Processing ALL {len(group_profiles)} group members (no member limits)")
             return group_profiles
             
         except Exception as e:
@@ -309,17 +311,21 @@ class UserProfileAgent:
     
     async def _ai_filter_flights_enhanced(self, flight_results: List[Dict[str, Any]], 
                                          group_profiles: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """ENHANCED: AI flight filtering with support for larger datasets - NO TIMEOUT LIMITS"""
+        """ENHANCED: AI flight filtering with support for larger datasets - NO TIMEOUT LIMITS, ALL MEMBERS"""
         try:
             # Extract enhanced data for all flights
             enhanced_flights = self._extract_enhanced_flight_data(flight_results)
             
-            # ENHANCED: Create efficient prompt for larger datasets
-            prompt = f"""Filter {len(enhanced_flights)} flights for group of {len(group_profiles)}.
+            # ENHANCED: Create efficient prompt for larger datasets with ALL group members
+            group_summary = self._create_group_summary_for_ai(group_profiles)
+            
+            prompt = f"""Filter {len(enhanced_flights)} flights for group of {len(group_profiles)} members.
 
-Return top 10 flights as JSON: {{"recommended_flights": [{{\"id\": 1}}, {{\"id\": 2}}, ...], "filtering_rationale": "brief reason"}}
+Group details: {group_summary}
 
-Flights: {json.dumps(enhanced_flights[:20])}...and {max(0, len(enhanced_flights)-20)} more"""  # Show first 20 + count
+Return top 10 flights as JSON: {{"recommended_flights": [{{\"id\": 1}}, {{\"id\": 2}}, ...], "filtering_rationale": "brief reason considering all {len(group_profiles)} members"}}
+
+Flights: {json.dumps(enhanced_flights[:20])}...and {max(0, len(enhanced_flights)-20)} more"""
 
             # Make optimized OpenAI call - NO TIMEOUT LIMITS
             response = self.openai_client.responses.create(
@@ -367,29 +373,33 @@ Flights: {json.dumps(enhanced_flights[:20])}...and {max(0, len(enhanced_flights)
                 # Enhanced fallback - return top 10
                 return {
                     "recommended_flights": flight_results[:10],
-                    "filtering_rationale": "Enhanced fallback - top 10 results"
+                    "filtering_rationale": f"Enhanced fallback - top 10 results for {len(group_profiles)} members"
                 }
                 
         except Exception:
             # Enhanced fallback - return top 10
             return {
                 "recommended_flights": flight_results[:10],
-                "filtering_rationale": "Enhanced fallback - top 10 results"
+                "filtering_rationale": f"Enhanced fallback - top 10 results for {len(group_profiles)} members"
             }
     
     async def _ai_filter_hotels_enhanced(self, hotel_results: List[Dict[str, Any]], 
                                         group_profiles: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """ENHANCED: AI hotel filtering with support for larger datasets - NO TIMEOUT LIMITS"""
+        """ENHANCED: AI hotel filtering with support for larger datasets - NO TIMEOUT LIMITS, ALL MEMBERS"""
         try:
             # Extract enhanced data for all hotels
             enhanced_hotels = self._extract_enhanced_hotel_data(hotel_results)
             
-            # ENHANCED: Create efficient prompt for larger datasets
-            prompt = f"""Filter {len(enhanced_hotels)} hotels for group of {len(group_profiles)}.
+            # ENHANCED: Create efficient prompt for larger datasets with ALL group members
+            group_summary = self._create_group_summary_for_ai(group_profiles)
+            
+            prompt = f"""Filter {len(enhanced_hotels)} hotels for group of {len(group_profiles)} members.
 
-Return top 10 hotels as JSON: {{"recommended_hotels": [{{\"id\": 1}}, {{\"id\": 2}}, ...], "filtering_rationale": "brief reason"}}
+Group details: {group_summary}
 
-Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20)} more"""  # Show first 20 + count
+Return top 10 hotels as JSON: {{"recommended_hotels": [{{\"id\": 1}}, {{\"id\": 2}}, ...], "filtering_rationale": "brief reason considering all {len(group_profiles)} members"}}
+
+Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20)} more"""
 
             # Make optimized OpenAI call - NO TIMEOUT LIMITS
             response = self.openai_client.responses.create(
@@ -437,21 +447,77 @@ Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20
                 # Enhanced fallback - return top 10
                 return {
                     "recommended_hotels": hotel_results[:10],
-                    "filtering_rationale": "Enhanced fallback - top 10 results"
+                    "filtering_rationale": f"Enhanced fallback - top 10 results for {len(group_profiles)} members"
                 }
                 
         except Exception:
             # Enhanced fallback - return top 10
             return {
                 "recommended_hotels": hotel_results[:10],
-                "filtering_rationale": "Enhanced fallback - top 10 results"
+                "filtering_rationale": f"Enhanced fallback - top 10 results for {len(group_profiles)} members"
             }
+    
+    def _create_group_summary_for_ai(self, group_profiles: List[Dict[str, Any]]) -> str:
+        """NEW: Create a concise summary of ALL group members for AI processing"""
+        try:
+            if not group_profiles:
+                return "Single traveler"
+            
+            # Extract key information from all profiles
+            travel_styles = []
+            cities = []
+            ages = []
+            
+            for profile in group_profiles:
+                # Travel style
+                if profile.get("travel_style"):
+                    travel_styles.append(profile["travel_style"])
+                
+                # City
+                if profile.get("city"):
+                    cities.append(profile["city"])
+                
+                # Calculate approximate age from birthdate
+                if profile.get("birthdate"):
+                    try:
+                        from datetime import date
+                        birth_year = int(profile["birthdate"][:4])
+                        current_year = date.today().year
+                        age = current_year - birth_year
+                        if 0 < age < 120:  # Reasonable age range
+                            ages.append(age)
+                    except:
+                        pass
+            
+            # Create summary
+            summary_parts = [f"{len(group_profiles)} members"]
+            
+            if travel_styles:
+                unique_styles = list(set(travel_styles))
+                summary_parts.append(f"styles: {', '.join(unique_styles)}")
+            
+            if ages:
+                avg_age = sum(ages) // len(ages)
+                summary_parts.append(f"avg age: {avg_age}")
+            
+            if cities:
+                unique_cities = list(set(cities))
+                if len(unique_cities) <= 3:
+                    summary_parts.append(f"from: {', '.join(unique_cities)}")
+                else:
+                    summary_parts.append(f"from {len(unique_cities)} cities")
+            
+            return "; ".join(summary_parts)
+            
+        except Exception as e:
+            logger.error(f"Error creating group summary: {e}")
+            return f"{len(group_profiles)} members"
     
     def _cleanup_cache(self):
         """Keep cache size manageable"""
-        if len(self._filter_cache) > 10:  # Increased cache size for larger datasets
+        if len(self._filter_cache) > 15:  # Increased cache size for larger group datasets
             # Remove oldest entries
-            keys_to_remove = list(self._filter_cache.keys())[:-10]
+            keys_to_remove = list(self._filter_cache.keys())[:-15]
             for key in keys_to_remove:
                 del self._filter_cache[key]
 
