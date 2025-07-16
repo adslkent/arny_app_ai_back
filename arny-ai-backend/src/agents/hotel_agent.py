@@ -272,4 +272,160 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
         return {
             "success": False,
             "error": str(e),
-            "message": f"I
+            "message": f"I encountered an error searching for hotels: {str(e)}"
+        }
+
+class HotelAgent:
+    """
+    Hotel agent with enhanced capabilities for larger datasets
+    """
+    
+    def __init__(self):
+        global _current_hotel_agent
+        
+        self.openai_client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+        self.amadeus_service = AmadeusService()
+        self.db = DatabaseOperations()
+        self.profile_agent = UserProfileAgent()
+        
+        # Initialize context variables
+        self.current_user_id = None
+        self.current_session_id = None
+        self.user_profile = None
+        
+        # Initialize search result storage
+        self.latest_search_results = []
+        self.latest_search_id = None
+        self.latest_filtering_info = {}
+        
+        # Initialize search cache for enhanced performance
+        self._search_cache = {}
+        
+        # Set this instance as the global instance for tools
+        _current_hotel_agent = self
+        
+        # Create the agent with enhanced settings
+        self.agent = Agent(
+            name="Arny Hotel Assistant", 
+            instructions=get_hotel_system_message(),
+            model="o4-mini",  # Use efficient model
+            tools=[search_hotels_tool]
+        )
+    
+    async def process_message(self, user_id: str, message: str, session_id: str,
+                             user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
+        """
+        Process hotel search requests - ENHANCED VERSION with support for larger datasets
+        """
+        
+        try:
+            print(f"🏨 ENHANCED HotelAgent processing: '{message[:50]}...'")
+            start_time = datetime.now()
+            
+            # Clear previous search results
+            self.latest_search_results = []
+            self.latest_search_id = None
+            self.latest_filtering_info = {}
+            
+            # Store context for tool calls
+            self.current_user_id = user_id
+            self.current_session_id = session_id
+            self.user_profile = user_profile
+            
+            # Update the global instance
+            global _current_hotel_agent
+            _current_hotel_agent.current_user_id = user_id
+            _current_hotel_agent.current_session_id = session_id
+            _current_hotel_agent.user_profile = user_profile
+            _current_hotel_agent.latest_search_results = []
+            _current_hotel_agent.latest_search_id = None
+            _current_hotel_agent.latest_filtering_info = {}
+            
+            print(f"🔧 Context set: user_id={user_id}")
+            
+            # Build conversation context (optimized for performance)
+            context_messages = []
+            for msg in conversation_history[-8:]:  # Last 8 messages for context
+                context_messages.append({
+                    "role": msg.message_type,
+                    "content": msg.content
+                })
+            
+            print(f"🔧 Processing with {len(context_messages)} previous messages")
+            
+            # ENHANCED: Direct agent processing with improved efficiency
+            if not context_messages:
+                # First message in conversation
+                print("🚀 Starting new hotel conversation")
+                result = await Runner.run(self.agent, message)
+            else:
+                # Continue conversation with context
+                print("🔄 Continuing hotel conversation with context")
+                result = await Runner.run(self.agent, context_messages + [{"role": "user", "content": message}])
+            
+            # Extract response
+            assistant_message = result.final_output
+            
+            # Get search results from global instance
+            global_agent = _get_hotel_agent()
+            search_results = global_agent.latest_search_results if global_agent else []
+            search_id = global_agent.latest_search_id if global_agent else None
+            filtering_info = global_agent.latest_filtering_info if global_agent else {}
+            
+            elapsed_time = (datetime.now() - start_time).total_seconds()
+            print(f"✅ ENHANCED HotelAgent completed in {elapsed_time:.2f}s")
+            print(f"📊 Retrieved search data: {len(search_results)} results, search_id: {search_id}")
+            
+            return {
+                "message": assistant_message,
+                "agent_type": "hotel",
+                "requires_action": False,
+                "search_results": search_results,
+                "search_id": search_id,
+                "filtering_info": filtering_info,
+                "metadata": {
+                    "agent_type": "hotel",
+                    "conversation_type": "hotel_search",
+                    "processing_time": elapsed_time
+                }
+            }
+        
+        except Exception as e:
+            print(f"❌ Error in hotel agent: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "message": "I'm sorry, I encountered an error while searching for hotels. Please try again.",
+                "agent_type": "hotel",
+                "error": str(e),
+                "requires_action": False,
+                "search_results": [],
+                "search_id": None,
+                "filtering_info": {}
+            }
+    
+    def _convert_to_city_code_enhanced(self, location: str) -> str:
+        """ENHANCED: Enhanced city code conversion with better mapping"""
+        
+        location_lower = location.lower().strip().replace(" ", "")
+        
+        # Direct lookup in enhanced mapping
+        if location_lower in CITY_CODE_MAPPING:
+            return CITY_CODE_MAPPING[location_lower]
+        
+        # Try with spaces for exact matches
+        location_lower_with_spaces = location.lower().strip()
+        if location_lower_with_spaces in CITY_CODE_MAPPING:
+            return CITY_CODE_MAPPING[location_lower_with_spaces]
+        
+        # If already looks like city code (3 letters)
+        if len(location) == 3 and location.isalpha():
+            return location.upper()
+        
+        # Enhanced fallback with partial matching
+        for city, code in CITY_CODE_MAPPING.items():
+            if city in location_lower or location_lower in city:
+                return code
+        
+        # Default: return as-is
+        return location.upper()
