@@ -43,8 +43,19 @@ custom:
   pythonRequirements:
     dockerizePip: true
     layer: true
-    slim: true
+    slim: false  # CHANGED: Disabled slim to prevent stripping of package metadata
     strip: false
+    # ADDED: Explicitly include problematic packages
+    staticCacheMaxVersions: 0
+    useDownloadCache: false
+    # ADDED: Specify packages that should not be zipped
+    noDeploy:
+      - boto3
+      - botocore
+    # ADDED: Include packages that might have metadata issues
+    pipCmdExtraArgs:
+      - --no-cache-dir
+      - --force-reinstall
 
 functions:
   # Authentication functions - keep shorter timeout since auth operations are quick
@@ -130,7 +141,7 @@ functions:
   # Health check function - very quick
   health:
     handler: src/main.lambda_handler
-    timeout: 10
+    timeout: 5
     memorySize: 256
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
@@ -140,95 +151,43 @@ functions:
           method: get
           cors: true
 
-# CloudFormation resources
+# AWS resources
 resources:
   Resources:
-    # API Gateway configuration for custom domain (optional)
-    ApiGatewayRestApi:
-      Type: AWS::ApiGateway::RestApi
+    # Configure CORS for API Gateway
+    GatewayResponseDefault4XX:
+      Type: 'AWS::ApiGateway::GatewayResponse'
       Properties:
-        Name: ${self:service}-${self:provider.stage}
-        Description: Arny AI Backend API
-        EndpointConfiguration:
-          Types:
-            - REGIONAL
-
-    # CloudWatch Log Groups with optimized retention
-    AuthLogGroup:
-      Type: AWS::Logs::LogGroup
-      Properties:
-        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-auth
-        RetentionInDays: 14
-
-    OnboardingLogGroup:
-      Type: AWS::Logs::LogGroup
-      Properties:
-        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-onboarding
-        RetentionInDays: 14
-
-    TravelLogGroup:
-      Type: AWS::Logs::LogGroup
-      Properties:
-        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-travel
-        RetentionInDays: 14
-
-    UserLogGroup:
-      Type: AWS::Logs::LogGroup
-      Properties:
-        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-user
-        RetentionInDays: 14
-
-    HealthLogGroup:
-      Type: AWS::Logs::LogGroup
-      Properties:
-        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-health
-        RetentionInDays: 14
-
-  Outputs:
-    ApiEndpoint:
-      Description: API Gateway endpoint URL
-      Value:
-        Fn::Join:
-          - ''
-          - - 'https://'
-            - Ref: ApiGatewayRestApi
-            - '.execute-api.'
-            - ${self:provider.region}
-            - '.amazonaws.com/'
-            - ${self:provider.stage}
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'*'"
+        ResponseType: DEFAULT_4XX
+        RestApiId:
+          Ref: 'RestApiApigEvent'
+        StatusCode: '404'
     
-    TravelFunctionUrl:
-      Description: Direct Lambda Function URL for ALL travel chat (up to 15 minutes timeout)
-      Value:
-        Fn::GetAtt: TravelLambdaFunctionUrl.FunctionUrl
-    
-    AuthEndpoint:
-      Description: Authentication endpoint
-      Value:
-        Fn::Join:
-          - ''
-          - - 'https://'
-            - Ref: ApiGatewayRestApi
-            - '.execute-api.'
-            - ${self:provider.region}
-            - '.amazonaws.com/'
-            - ${self:provider.stage}
-            - '/auth'
-    
-    OnboardingEndpoint:
-      Description: Onboarding endpoint
-      Value:
-        Fn::Join:
-          - ''
-          - - 'https://'
-            - Ref: ApiGatewayRestApi
-            - '.execute-api.'
-            - ${self:provider.region}
-            - '.amazonaws.com/'
-            - ${self:provider.stage}
-            - '/onboarding'
-    
-    TravelEndpoint:
-      Description: Travel chat endpoint (Function URL ONLY - 15 min timeout)
-      Value:
-        Fn::GetAtt: TravelLambdaFunctionUrl.FunctionUrl
+    GatewayResponseDefault5XX:
+      Type: 'AWS::ApiGateway::GatewayResponse'
+      Properties:
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'*'"
+        ResponseType: DEFAULT_5XX
+        RestApiId:
+          Ref: 'RestApiApigEvent'
+        StatusCode: '500'
+
+# Package configuration
+package:
+  patterns:
+    - '!node_modules/**'
+    - '!.serverless/**'
+    - '!.git/**'
+    - '!__pycache__/**'
+    - '!*.pyc'
+    - '!.pytest_cache/**'
+    - '!tests/**'
+    - '!.env'
+    - '!README.md'
