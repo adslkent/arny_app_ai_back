@@ -473,7 +473,7 @@ class HotelAgent:
             }
     
     # ==================== HELPER METHODS ====================
-    
+        
     @openai_agents_sdk_retry
     async def _run_agent_with_retry(self, agent, messages):
         """Run agent with retry logic and validation - ENHANCED for NO TIMEOUT LIMITS"""
@@ -481,15 +481,13 @@ class HotelAgent:
         try:
             print(f"🔄 Running hotel agent with retry logic...")
             
-            # ENHANCED: Use Runner.run_sync for improved reliability
+            # FIXED: Use Runner.run as static method instead of instantiating Runner
             if isinstance(messages, str):
                 # Single message
-                runner = Runner(agent=agent)
-                result = runner.run_sync(content_str=messages)
+                result = await Runner.run(agent, messages)
             else:
                 # Multiple messages (conversation context)
-                runner = Runner(agent=agent)
-                result = runner.run_sync(messages=messages)
+                result = await Runner.run(agent, messages)
             
             # ENHANCED: Validate result and ensure it has the required structure
             if not result:
