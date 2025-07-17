@@ -78,28 +78,31 @@ def retry_on_openai_http_status_error(result):
         return result.response.status_code >= 400
     return False
 
-def retry_on_agent_runner_validation_failure(result):
-    """Condition 5: Retry if Agent Runner result fails Pydantic validation"""
-    try:
-        if result:
-            AgentRunnerResponse.model_validate(result.__dict__ if hasattr(result, '__dict__') else result)
-        return False
-    except (ValidationError, AttributeError):
-        return True
+def retry_on_openai_validation_failure(result):
+    """Condition 5: Retry on validation failures"""
+    if isinstance(result, AgentRunnerResponse):
+        return result.final_output is None
+    return False
 
 def retry_on_openai_api_exception(exception):
-    """Condition 4: Custom exception checker for OpenAI API calls"""
+    """Condition 3: Check if exception is related to OpenAI API timeouts or rate limits"""
     exception_str = str(exception).lower()
-    return any(keyword in exception_str for keyword in [
-        'timeout', 'failed', 'unavailable', 'rate limit', 'api error',
-        'connection', 'network', 'server error'
-    ])
+    return (
+        "timeout" in exception_str or
+        "rate limit" in exception_str or
+        "429" in exception_str or
+        "502" in exception_str or
+        "503" in exception_str or
+        "504" in exception_str
+    )
 
-# OpenAI Agents SDK retry decorator with all 5 conditions
+# ==================== RETRY DECORATORS ====================
+
 openai_agents_sdk_retry = retry(
+    reraise=True,
     retry=retry_any(
-        # Condition 3: Exception message matching
-        retry_if_exception_message(match=r".*(timeout|failed|unavailable|rate.limit|api.error|connection|network|server.error).*"),
+        # Condition 3: OpenAI API exceptions (timeouts, rate limits, server errors)
+        retry_if_exception_message(match=r".*(?i)(timeout|rate.limit|429|502|503|504).*"),
         # Condition 4: Exception types and custom checkers
         retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
         retry_if_exception(retry_on_openai_api_exception),
@@ -108,17 +111,17 @@ openai_agents_sdk_retry = retry(
         # Condition 1: HTTP status code checking
         retry_if_result(retry_on_openai_http_status_error),
         # Condition 5: Validation failure
-        retry_if_result(retry_on_agent_runner_validation_failure)
+        retry_if_result(retry_on_openai_validation_failure)
     ),
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=1.5, min=1, max=15),
     before_sleep=before_sleep_log(logger, logging.WARNING)
 )
 
-# ===== ENHANCED City Code Mapping =====
+# ===== City Code Mapping =====
 CITY_CODE_MAPPING = {
     "london": "LON", "paris": "PAR", "newyork": "NYC", "new york": "NYC",
-    "tokyo": "TYO", "beijing": "PEK", "shanghai": "SHA", "hongkong": "HKG",
+    "tokyo": "TYO", "beijing": "BJS", "shanghai": "SHA", "hongkong": "HKG",
     "hong kong": "HKG", "singapore": "SIN", "bangkok": "BKK", "sydney": "SYD",
     "dubai": "DXB", "losangeles": "LAX", "los angeles": "LAX",
     "sanfrancisco": "SFO", "san francisco": "SFO", "berlin": "BER",
@@ -215,39 +218,48 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
         # OPTIMIZATION 1: Check if this exact search was already done
         search_key = f"{destination}_{check_in_date}_{check_out_date}_{adults}_{rooms}"
         if hasattr(hotel_agent, '_search_cache') and search_key in hotel_agent._search_cache:
-            print(f"⚡ Cache hit! Returning cached result for {search_key}")
-            return hotel_agent._search_cache[search_key]
+            print(f"⚡ Cache hit! Returning cached results for {search_key}")
+            cached_result = hotel_agent._search_cache[search_key]
+            
+            # Store cached results in agent for response
+            hotel_agent.latest_search_results = cached_result["filtered_results"]
+            hotel_agent.latest_search_id = cached_result["search_id"]
+            hotel_agent.latest_filtering_info = cached_result["filtering_info"]
+            
+            return cached_result["response"]
         
         # OPTIMIZATION 2: Set default check-out date if not provided
         if not check_out_date:
             check_in_dt = datetime.strptime(check_in_date, "%Y-%m-%d")
             check_out_dt = check_in_dt + timedelta(days=1)
             check_out_date = check_out_dt.strftime("%Y-%m-%d")
-            print(f"📅 No check-out date provided, using default: {check_out_date}")
+            print(f"🔧 Set default check-out date: {check_out_date}")
         
-        # OPTIMIZATION 3: Convert city to hotel search format
-        destination_code = CITY_CODE_MAPPING.get(destination.lower().replace(" ", ""), destination)
+        # OPTIMIZATION 3: Convert city name to destination code
+        destination_lower = destination.lower().replace(" ", "").replace("-", "")
+        destination_code = CITY_CODE_MAPPING.get(destination_lower, destination)
         
-        print(f"🏨 Searching hotels: {destination} ({destination_code})")
-        print(f"📅 Check-in: {check_in_date}, Check-out: {check_out_date}")
-        print(f"👥 Adults: {adults}, Rooms: {rooms}")
+        print(f"🎯 Searching hotels in: {destination_code} ({destination})")
+        print(f"📅 Dates: {check_in_date} to {check_out_date}")
+        print(f"👥 {adults} adults, {rooms} rooms")
         
-        # FIXED: Use correct parameter names for AmadeusService.search_hotels()
-        print("🔍 Calling Amadeus Hotel Search API...")
+        # OPTIMIZATION 4: Search hotels using Amadeus API
         hotels_response = await hotel_agent.amadeus_service.search_hotels(
             city_code=destination_code,
             check_in_date=check_in_date,
             check_out_date=check_out_date,
             adults=adults,
             rooms=rooms,
-            max_results=50  # ENHANCED: Get up to 50 results for better filtering
+            max_results=50  # ENHANCED: Get up to 50 results
         )
         
+        # OPTIMIZATION 5: Handle API response
         if not hotels_response.get("success"):
             return {
                 "success": False,
                 "error": hotels_response.get("error", "Hotel search failed"),
-                "message": f"Sorry, I couldn't find hotels in {destination}. Please try a different location or dates."
+                "message": "I couldn't find hotels for those dates and location. "
+                          "Please try a different location or dates."
             }
         
         raw_hotels = hotels_response.get("results", [])
@@ -315,10 +327,11 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
             "reasoning": filtering_result.get("reasoning", "Profile-based filtering applied")
         }
         
-        # OPTIMIZATION 9: Create enhanced result payload
-        result_payload = {
+        # OPTIMIZATION 10: Prepare response for agent
+        response_data = {
             "success": True,
             "results": filtering_result["filtered_results"],
+            "message": f"Found {len(filtering_result['filtered_results'])} hotels in {destination}",
             "search_id": hotel_search.id,
             "search_params": {
                 "city_code": destination_code,
@@ -330,24 +343,24 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
             "filtering_info": hotel_agent.latest_filtering_info
         }
         
-        # OPTIMIZATION 10: Cache the result
-        if not hasattr(hotel_agent, '_search_cache'):
-            hotel_agent._search_cache = {}
-        hotel_agent._search_cache[search_key] = result_payload
-        
-        # Keep cache manageable (max 10 entries)
-        if len(hotel_agent._search_cache) > 10:
-            oldest_key = list(hotel_agent._search_cache.keys())[0]
-            del hotel_agent._search_cache[oldest_key]
+        # OPTIMIZATION 11: Cache the results for future use
+        if hasattr(hotel_agent, '_search_cache'):
+            hotel_agent._search_cache[search_key] = {
+                "response": response_data,
+                "filtered_results": filtering_result["filtered_results"],
+                "search_id": hotel_search.id,
+                "filtering_info": hotel_agent.latest_filtering_info,
+                "timestamp": datetime.now()
+            }
+            print(f"📦 Cached search results for key: {search_key}")
         
         elapsed_time = (datetime.now() - start_time).total_seconds()
-        print(f"✅ ENHANCED Hotel search completed in {elapsed_time:.2f}s!")
+        print(f"⚡ ENHANCED hotel search completed in {elapsed_time:.2f}s")
         
-        return result_payload
+        return response_data
         
     except Exception as e:
-        elapsed_time = (datetime.now() - start_time).total_seconds()
-        print(f"❌ Error in search_hotels_tool after {elapsed_time:.2f}s: {str(e)}")
+        print(f"❌ Error in hotel search: {e}")
         import traceback
         traceback.print_exc()
         return {
@@ -356,9 +369,11 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
             "message": f"I encountered an error searching for hotels: {str(e)}"
         }
 
+# ==================== HOTEL AGENT CLASS ====================
+
 class HotelAgent:
     """
-    Hotel agent with enhanced capabilities for larger datasets
+    Hotel agent using OpenAI Agents SDK with Amadeus API tools and enhanced filtering
     """
     
     def __init__(self):
@@ -374,22 +389,22 @@ class HotelAgent:
         self.current_session_id = None
         self.user_profile = None
         
-        # Initialize search result storage
+        # Add attributes to store latest search results for response
         self.latest_search_results = []
         self.latest_search_id = None
         self.latest_filtering_info = {}
         
-        # Initialize search cache for enhanced performance
+        # ADDED: Initialize search cache for enhanced performance (matching flight agent)
         self._search_cache = {}
         
-        # Set this instance as the global instance for tools
+        # Store this instance globally for tool access
         _current_hotel_agent = self
         
-        # Create the agent with enhanced settings
+        # Create the agent with hotel search tools
         self.agent = Agent(
-            name="Arny Hotel Assistant", 
+            name="Arny Hotel Assistant",
             instructions=get_hotel_system_message(),
-            model="o4-mini",  # Use efficient model
+            model="o4-mini",
             tools=[search_hotels_tool]
         )
     
@@ -431,7 +446,8 @@ class HotelAgent:
             
             # Build conversation context (optimized for performance)
             context_messages = []
-            for msg in conversation_history[-8:]:  # Last 8 messages for context
+            # UNIFIED CONTEXT: Use last 50 messages for context (matching flight agent)
+            for msg in conversation_history[-50:]:
                 context_messages.append({
                     "role": msg.message_type,
                     "content": msg.content
@@ -489,3 +505,10 @@ class HotelAgent:
                 "search_id": None,
                 "filtering_info": {}
             }
+
+# ==================== MODULE EXPORTS ====================
+
+__all__ = [
+    'HotelAgent',
+    'search_hotels_tool'
+]
