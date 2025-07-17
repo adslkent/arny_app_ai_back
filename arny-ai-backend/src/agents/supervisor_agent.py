@@ -91,7 +91,8 @@ openai_api_retry = retry(
     reraise=True,
     retry=retry_any(
         # Condition 3: OpenAI API exceptions (timeouts, rate limits, server errors)
-        retry_if_exception_message(match=r".*(?i)(timeout|rate.limit|429|502|503|504).*"),
+        # FIXED: Moved (?i) flag to the beginning of the regex pattern
+        retry_if_exception_message(match=r"(?i).*(timeout|rate.limit|429|502|503|504).*"),
         # Condition 4: Exception types and custom checkers
         retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
         retry_if_exception(retry_on_openai_api_exception),
@@ -157,205 +158,183 @@ class SupervisorAgent:
             return {
                 "message": "I'm sorry, I encountered an error processing your request. Please try again.",
                 "agent_type": "supervisor",
+                "error": str(e),
                 "requires_action": False,
-                "error": str(e)
+                "search_results": [],
+                "search_id": None,
+                "filtering_info": {}
             }
     
     def _ultra_fast_routing(self, message: str) -> str:
         """
-        ULTRA-OPTIMIZATION: Instant keyword-based routing (no LLM calls)
+        OPTIMIZATION: Ultra-fast keyword-based routing without LLM calls
+        
+        Returns:
+            - "flight_search": For flight-related requests
+            - "hotel_search": For hotel-related requests  
+            - "general": For general conversation
         """
         
         message_lower = message.lower()
         
-        # Flight keywords - prioritized list
+        # FLIGHT KEYWORDS (comprehensive list)
         flight_keywords = [
-            'flight', 'flights', 'fly', 'flying', 'plane', 'airline', 'airport', 
-            'departure', 'arrival', 'ticket', 'book flight', 'find flight',
-            'airfare', 'air travel', 'aviation'
+            "flight", "flights", "fly", "flying", "plane", "airplane", "aircraft",
+            "departure", "arrive", "arrival", "takeoff", "landing", "airline", "airways",
+            "airport", "boarding", "check-in", "gate", "terminal", "runway",
+            "ticket", "booking", "seat", "aisle", "window", "economy", "business", "first class",
+            "layover", "stopover", "direct", "nonstop", "connecting", "transfer",
+            "baggage", "luggage", "carry-on", "checked bag",
+            "itinerary", "travel time", "flight time", "duration",
+            "roundtrip", "round trip", "one way", "return",
+            # Specific airlines
+            "qantas", "jetstar", "virgin", "american airlines", "united", "delta",
+            "british airways", "lufthansa", "air france", "singapore airlines", "emirates"
         ]
         
-        # Hotel keywords - prioritized list  
+        # HOTEL KEYWORDS (comprehensive list)
         hotel_keywords = [
-            'hotel', 'hotels', 'accommodation', 'stay', 'room', 'rooms',
-            'check-in', 'check-out', 'booking', 'book hotel', 'find hotel',
-            'resort', 'motel', 'inn', 'lodge', 'hostel'
+            "hotel", "hotels", "stay", "staying", "accommodation", "accommodations",
+            "room", "rooms", "suite", "bed", "bedroom", "bathroom",
+            "check-in", "check-out", "checkin", "checkout",
+            "reservation", "booking", "book", "reserve",
+            "night", "nights", "overnight", "sleep",
+            "lodge", "inn", "resort", "motel", "hostel", "b&b", "bed and breakfast",
+            "apartment", "villa", "house", "rental",
+            "amenities", "pool", "gym", "spa", "restaurant", "breakfast",
+            "wifi", "parking", "concierge", "housekeeping",
+            "star", "rating", "luxury", "budget", "cheap", "expensive",
+            # Hotel chains
+            "hilton", "marriott", "hyatt", "sheraton", "holiday inn", "best western",
+            "intercontinental", "radisson", "westin", "renaissance"
         ]
         
-        # Quick flight detection
-        if any(keyword in message_lower for keyword in flight_keywords):
-            return "flight_search"
+        # Count keyword matches
+        flight_score = sum(1 for keyword in flight_keywords if keyword in message_lower)
+        hotel_score = sum(1 for keyword in hotel_keywords if keyword in message_lower)
         
-        # Quick hotel detection
-        elif any(keyword in message_lower for keyword in hotel_keywords):
+        print(f"🎯 Routing scores - Flight: {flight_score}, Hotel: {hotel_score}")
+        
+        # Routing logic with clear priority
+        if flight_score > hotel_score and flight_score > 0:
+            return "flight_search"
+        elif hotel_score > flight_score and hotel_score > 0:
             return "hotel_search"
+        elif flight_score == hotel_score and flight_score > 0:
+            # Tie-breaker: Look for more specific patterns
+            if any(word in message_lower for word in ["from", "to", "departure", "arrival", "fly"]):
+                return "flight_search"
+            elif any(word in message_lower for word in ["stay", "night", "check-in", "room"]):
+                return "hotel_search"
         
         # Default to general conversation
-        else:
-            return "general"
+        return "general"
     
+    @openai_api_retry
     async def _handle_general_conversation_no_timeout(self, user_id: str, message: str, session_id: str,
-                                                    user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
+                                                     user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
         """
-        ENHANCED: Fast general conversation with NO TIMEOUT LIMITS and unified conversation context
+        ENHANCED: Handle general conversation with conversation history and NO TIMEOUT LIMITS
         """
         
         try:
-            print(f"💬 Fast general conversation with unified context - NO TIMEOUT LIMITS")
+            print(f"💬 Handling general conversation for: '{message[:50]}...'")
             
-            # Build minimal user context
-            user_context = ""
-            if user_profile.get("name"):
-                user_context += f"User's name: {user_profile['name']}\n"
-            if user_profile.get("city"):
-                user_context += f"User's city: {user_profile['city']}\n"
+            # Build conversation context with proper message structure
+            context_messages = [
+                {
+                    "role": "system",
+                    "content": self._get_general_conversation_system_prompt(user_profile)
+                }
+            ]
             
-            # UNIFIED CONTEXT: Build conversation context from history (last 50 messages)
-            context_messages = []
+            # UNIFIED CONTEXT: Add recent conversation history (last 50 messages)
             for msg in conversation_history[-50:]:
                 context_messages.append({
                     "role": msg.message_type,
                     "content": msg.content
                 })
             
-            print(f"🔧 Processing general conversation with {len(context_messages)} previous messages")
+            # Add current user message
+            context_messages.append({
+                "role": "user",
+                "content": message
+            })
             
-            # Ultra-short system prompt for efficiency
-            system_prompt = f"""You are Arny, a helpful AI travel assistant. 
-
-{user_context}
-
-For specific searches, ask users to request "flights" or "hotels" with dates and destinations.
-Keep responses friendly and brief."""
-
-            # ENHANCED: Direct OpenAI call with conversation context and NO TIMEOUT LIMITS
-            try:
-                if context_messages:
-                    # Include conversation history for context-aware responses
-                    assistant_message = await self._make_openai_call_with_context(
-                        system_prompt, message, context_messages
-                    )
-                else:
-                    # First message, no history
-                    assistant_message = await self._make_openai_call_no_timeout(
-                        system_prompt, message
-                    )
-                    
-            except Exception as openai_error:
-                print(f"⚠️ OpenAI error: {openai_error}")
-                assistant_message = "I'm here to help with your travel planning! You can ask me to search for flights or hotels with your travel dates."
+            print(f"🔧 General conversation with {len(context_messages)-2} previous messages")
+            
+            # Call OpenAI with retry logic
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",  # Use efficient model for general conversation
+                messages=context_messages,
+                temperature=0.7,
+                max_tokens=1000
+            )
+            
+            assistant_message = response.choices[0].message.content
+            
+            print(f"✅ General conversation response generated: '{assistant_message[:50]}...'")
             
             return {
                 "message": assistant_message,
                 "agent_type": "supervisor",
                 "requires_action": False,
+                "search_results": [],
+                "search_id": None,
+                "filtering_info": {},
                 "metadata": {
                     "agent_type": "supervisor",
                     "conversation_type": "general",
-                    "context_messages_count": len(context_messages)
+                    "model_used": "gpt-4o-mini"
                 }
             }
-            
+        
         except Exception as e:
             print(f"❌ Error in general conversation: {e}")
             return {
-                "message": "I'm here to help with your travel planning! You can ask me to search for flights or hotels.",
+                "message": "I'm here to help you with travel planning. You can ask me about flights, hotels, or general travel questions!",
                 "agent_type": "supervisor",
+                "error": str(e),
                 "requires_action": False,
-                "metadata": {
-                    "agent_type": "supervisor",
-                    "conversation_type": "general",
-                    "error": str(e)
-                }
+                "search_results": [],
+                "search_id": None,
+                "filtering_info": {}
             }
     
-    @openai_api_retry
-    async def _make_openai_call_no_timeout(self, system_prompt: str, user_message: str) -> str:
-        """ENHANCED: Make OpenAI call for general conversation with NO TIMEOUT LIMITS and Tenacity retry strategies"""
-        
-        # Use ultra-short prompt for efficiency
-        input_prompt = f"""System: {system_prompt}
-
-User: {user_message}
-
-Assistant (be brief and helpful):"""
-        
-        response = self.openai_client.responses.create(
-            model="o4-mini",
-            input=input_prompt
-        )
-        
-        # Extract response quickly
-        assistant_message = "I'm here to help with your travel planning!"
-        
-        if response and hasattr(response, 'output') and response.output:
-            for output_item in response.output:
-                if hasattr(output_item, 'content') and output_item.content:
-                    for content_item in output_item.content:
-                        if hasattr(content_item, 'text') and content_item.text:
-                            assistant_message = content_item.text.strip()
-                            break
-                    if assistant_message != "I'm here to help with your travel planning!":
-                        break
-        
-        return assistant_message
-    
-    @openai_api_retry
-    async def _make_openai_call_with_context(self, system_prompt: str, user_message: str, 
-                                           context_messages: List[Dict[str, str]]) -> str:
-        """ENHANCED: Make OpenAI call with conversation context for better continuity"""
-        
-        # Build conversation context for better responses
-        conversation_context = ""
-        if context_messages:
-            # Include last few messages for context (limit to keep prompt manageable)
-            recent_messages = context_messages[-10:]  # Last 10 for context building
-            for msg in recent_messages:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                if content:
-                    conversation_context += f"{role.title()}: {content}\n"
-        
-        # Build prompt with context
-        input_prompt = f"""System: {system_prompt}
-
-Previous conversation:
-{conversation_context}
-
-User: {user_message}
-
-Assistant (be brief and helpful, considering the conversation context):"""
-        
-        response = self.openai_client.responses.create(
-            model="o4-mini",
-            input=input_prompt
-        )
-        
-        # Extract response
-        assistant_message = "I'm here to help with your travel planning!"
-        
-        if response and hasattr(response, 'output') and response.output:
-            for output_item in response.output:
-                if hasattr(output_item, 'content') and output_item.content:
-                    for content_item in output_item.content:
-                        if hasattr(content_item, 'text') and content_item.text:
-                            assistant_message = content_item.text.strip()
-                            break
-                    if assistant_message != "I'm here to help with your travel planning!":
-                        break
-        
-        return assistant_message
-
-    # ==================== ADDITIONAL METHODS FOR COMPATIBILITY ====================
-    
-    async def handle_general_conversation(self, user_id: str, message: str, session_id: str,
-                                        user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
+    def _get_general_conversation_system_prompt(self, user_profile: Dict[str, Any]) -> str:
         """
-        Compatibility method for general conversation handling (calls the main method)
+        Generate system prompt for general conversation based on user profile
         """
-        return await self._handle_general_conversation_no_timeout(
-            user_id, message, session_id, user_profile, conversation_history
-        )
+        
+        user_name = user_profile.get('name', 'there')
+        travel_style = user_profile.get('travel_style', 'balanced')
+        
+        return f"""You are Arny, a friendly and professional AI travel assistant. You're chatting with {user_name}.
+
+Your personality:
+- Warm, helpful, and knowledgeable about travel
+- Professional but conversational
+- Proactive in offering travel-related assistance
+- Knowledgeable about destinations, travel tips, and planning
+
+User's travel style: {travel_style}
+
+Your capabilities:
+- Flight search and recommendations
+- Hotel search and recommendations  
+- General travel advice and planning
+- Destination information
+- Travel tips and insights
+
+Guidelines:
+1. Be conversational and friendly
+2. If the user asks about flights or hotels, let them know you can help search for those
+3. Offer helpful travel tips and advice
+4. Ask clarifying questions when needed
+5. Keep responses concise but informative
+6. Show enthusiasm for travel and helping with their plans
+
+Remember: You can search for flights and hotels when users are ready, but for general conversation, just be helpful and engaging."""
 
 # ==================== MODULE EXPORTS ====================
 
