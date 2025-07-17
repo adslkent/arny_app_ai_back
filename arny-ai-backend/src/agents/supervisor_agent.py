@@ -1,92 +1,10 @@
 from typing import Dict, Any, Optional
 import asyncio
-import logging
-import requests
 from openai import OpenAI
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-    retry_if_exception_message,
-    retry_any,
-    retry_if_result,
-    before_sleep_log,
-    retry_if_exception
-)
-from pydantic import BaseModel, ValidationError
 
 from ..utils.config import config
 from .flight_agent import FlightAgent
 from .hotel_agent import HotelAgent
-
-# Set up logging
-logger = logging.getLogger(__name__)
-
-# ==================== PYDANTIC MODELS FOR VALIDATION ====================
-
-class OpenAIResponse(BaseModel):
-    """Pydantic model for OpenAI response validation"""
-    output: Optional[Any] = None
-
-# ==================== OPENAI API RETRY CONDITIONS ====================
-
-def retry_on_openai_api_error_result(result):
-    """Condition 2: Retry if OpenAI API result contains error/warning fields"""
-    if hasattr(result, 'error') and result.error:
-        return True
-    if isinstance(result, dict):
-        return (
-            result.get("error") is not None or
-            "warning" in result or
-            result.get("success") is False
-        )
-    return False
-
-def retry_on_openai_http_status_error(result):
-    """Condition 1: Retry on HTTP status errors for OpenAI API calls"""
-    if hasattr(result, 'status_code'):
-        return result.status_code >= 400
-    if hasattr(result, 'response') and hasattr(result.response, 'status_code'):
-        return result.response.status_code >= 400
-    return False
-
-def retry_on_openai_validation_failure(result):
-    """Condition 5: Retry if OpenAI result fails Pydantic validation"""
-    try:
-        if result:
-            OpenAIResponse.model_validate(result.__dict__ if hasattr(result, '__dict__') else result)
-        return False
-    except (ValidationError, AttributeError):
-        return True
-
-def retry_on_openai_api_exception(exception):
-    """Condition 4: Custom exception checker for OpenAI API calls"""
-    exception_str = str(exception).lower()
-    return any(keyword in exception_str for keyword in [
-        'timeout', 'failed', 'unavailable', 'rate limit', 'api error',
-        'connection', 'network', 'server error'
-    ])
-
-# OpenAI API retry decorator with all 5 conditions
-openai_api_retry = retry(
-    retry=retry_any(
-        # Condition 3: Exception message matching
-        retry_if_exception_message(match=r".*(timeout|failed|unavailable|rate.limit|api.error|connection|network|server.error).*"),
-        # Condition 4: Exception types and custom checkers
-        retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
-        retry_if_exception(retry_on_openai_api_exception),
-        # Condition 2: Error/warning field inspection
-        retry_if_result(retry_on_openai_api_error_result),
-        # Condition 1: HTTP status code checking
-        retry_if_result(retry_on_openai_http_status_error),
-        # Condition 5: Validation failure
-        retry_if_result(retry_on_openai_validation_failure)
-    ),
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1.5, min=1, max=15),
-    before_sleep=before_sleep_log(logger, logging.WARNING)
-)
 
 class SupervisorAgent:
     """
@@ -230,9 +148,8 @@ Keep responses friendly and brief."""
                 }
             }
     
-    @openai_api_retry
     async def _make_openai_call_no_timeout(self, system_prompt: str, user_message: str) -> str:
-        """ENHANCED: Make OpenAI call for general conversation with NO TIMEOUT LIMITS and Tenacity retry strategies"""
+        """ENHANCED: Make OpenAI call for general conversation with NO TIMEOUT LIMITS"""
         
         # Use ultra-short prompt for efficiency
         input_prompt = f"""System: {system_prompt}
@@ -260,9 +177,10 @@ Assistant (be brief and helpful):"""
                         break
         
         return assistant_message
-
-# ==================== MODULE EXPORTS ====================
-
-__all__ = [
-    'SupervisorAgent'
-]
+    
+    async def handle_general_conversation(self, user_id: str, message: str, session_id: str,
+                                        user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
+        """
+        Legacy method for backwards compatibility - delegates to process_message
+        """
+        return await self.process_message(user_id, message, session_id, user_profile, conversation_history)
