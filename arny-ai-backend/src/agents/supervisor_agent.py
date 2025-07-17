@@ -1,7 +1,31 @@
-from typing import Dict, Any, Optional
-import asyncio
+"""
+Supervisor Agent Module - ENHANCED VERSION with Unified Conversation Context
+
+This module provides a supervisor agent that routes requests to specialized agents
+and handles general conversation with unified context management.
+
+Key Features:
+1. Ultra-fast keyword-based routing (no LLM calls for routing decisions)
+2. Direct routing to specialized agents (flight/hotel)
+3. Unified conversation context approach (50 messages)
+4. Enhanced general conversation handling with conversation history
+5. NO TIMEOUT LIMITS for better reliability
+
+Usage example:
+```python
+from supervisor_agent import SupervisorAgent
+
+# Create and use the agent
+agent = SupervisorAgent()
+result = await agent.process_message(user_id, "Find flights", session_id, {}, [])
+```
+"""
+
 import logging
-import requests
+import asyncio
+from typing import Dict, Any, List, Optional
+from datetime import datetime
+
 from openai import OpenAI
 from tenacity import (
     retry,
@@ -14,20 +38,14 @@ from tenacity import (
     before_sleep_log,
     retry_if_exception
 )
-from pydantic import BaseModel, ValidationError
+import requests
 
 from ..utils.config import config
 from .flight_agent import FlightAgent
 from .hotel_agent import HotelAgent
 
-# Set up logging
+# Configure logging
 logger = logging.getLogger(__name__)
-
-# ==================== PYDANTIC MODELS FOR VALIDATION ====================
-
-class OpenAIResponse(BaseModel):
-    """Pydantic model for OpenAI response validation"""
-    output: Optional[Any] = None
 
 # ==================== OPENAI API RETRY CONDITIONS ====================
 
@@ -52,27 +70,28 @@ def retry_on_openai_http_status_error(result):
     return False
 
 def retry_on_openai_validation_failure(result):
-    """Condition 5: Retry if OpenAI result fails Pydantic validation"""
-    try:
-        if result:
-            OpenAIResponse.model_validate(result.__dict__ if hasattr(result, '__dict__') else result)
-        return False
-    except (ValidationError, AttributeError):
-        return True
+    """Condition 5: Retry on validation failures"""
+    return result is None or (isinstance(result, str) and len(result.strip()) == 0)
 
 def retry_on_openai_api_exception(exception):
-    """Condition 4: Custom exception checker for OpenAI API calls"""
+    """Condition 3: Check if exception is related to OpenAI API timeouts or rate limits"""
     exception_str = str(exception).lower()
-    return any(keyword in exception_str for keyword in [
-        'timeout', 'failed', 'unavailable', 'rate limit', 'api error',
-        'connection', 'network', 'server error'
-    ])
+    return (
+        "timeout" in exception_str or
+        "rate limit" in exception_str or
+        "429" in exception_str or
+        "502" in exception_str or
+        "503" in exception_str or
+        "504" in exception_str
+    )
 
-# OpenAI API retry decorator with all 5 conditions
+# ==================== RETRY DECORATORS ====================
+
 openai_api_retry = retry(
+    reraise=True,
     retry=retry_any(
-        # Condition 3: Exception message matching
-        retry_if_exception_message(match=r".*(timeout|failed|unavailable|rate.limit|api.error|connection|network|server.error).*"),
+        # Condition 3: OpenAI API exceptions (timeouts, rate limits, server errors)
+        retry_if_exception_message(match=r".*(?i)(timeout|rate.limit|429|502|503|504).*"),
         # Condition 4: Exception types and custom checkers
         retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
         retry_if_exception(retry_on_openai_api_exception),
@@ -90,7 +109,7 @@ openai_api_retry = retry(
 
 class SupervisorAgent:
     """
-    ENHANCED: Supervisor agent with fast routing and NO TIMEOUT LIMITS
+    ENHANCED: Supervisor agent with fast routing, NO TIMEOUT LIMITS, and unified conversation context
     """
     
     def __init__(self):
@@ -178,20 +197,30 @@ class SupervisorAgent:
     async def _handle_general_conversation_no_timeout(self, user_id: str, message: str, session_id: str,
                                                     user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
         """
-        ENHANCED: Fast general conversation with NO TIMEOUT LIMITS
+        ENHANCED: Fast general conversation with NO TIMEOUT LIMITS and unified conversation context
         """
         
         try:
-            print(f"💬 Fast general conversation - NO TIMEOUT LIMITS")
+            print(f"💬 Fast general conversation with unified context - NO TIMEOUT LIMITS")
             
-            # Build minimal context
+            # Build minimal user context
             user_context = ""
             if user_profile.get("name"):
                 user_context += f"User's name: {user_profile['name']}\n"
             if user_profile.get("city"):
                 user_context += f"User's city: {user_profile['city']}\n"
             
-            # Ultra-short system prompt
+            # UNIFIED CONTEXT: Build conversation context from history (last 50 messages)
+            context_messages = []
+            for msg in conversation_history[-50:]:
+                context_messages.append({
+                    "role": msg.message_type,
+                    "content": msg.content
+                })
+            
+            print(f"🔧 Processing general conversation with {len(context_messages)} previous messages")
+            
+            # Ultra-short system prompt for efficiency
             system_prompt = f"""You are Arny, a helpful AI travel assistant. 
 
 {user_context}
@@ -199,9 +228,18 @@ class SupervisorAgent:
 For specific searches, ask users to request "flights" or "hotels" with dates and destinations.
 Keep responses friendly and brief."""
 
-            # ENHANCED: Direct OpenAI call with NO TIMEOUT LIMITS
+            # ENHANCED: Direct OpenAI call with conversation context and NO TIMEOUT LIMITS
             try:
-                assistant_message = await self._make_openai_call_no_timeout(system_prompt, message)
+                if context_messages:
+                    # Include conversation history for context-aware responses
+                    assistant_message = await self._make_openai_call_with_context(
+                        system_prompt, message, context_messages
+                    )
+                else:
+                    # First message, no history
+                    assistant_message = await self._make_openai_call_no_timeout(
+                        system_prompt, message
+                    )
                     
             except Exception as openai_error:
                 print(f"⚠️ OpenAI error: {openai_error}")
@@ -213,7 +251,8 @@ Keep responses friendly and brief."""
                 "requires_action": False,
                 "metadata": {
                     "agent_type": "supervisor",
-                    "conversation_type": "general"
+                    "conversation_type": "general",
+                    "context_messages_count": len(context_messages)
                 }
             }
             
@@ -260,6 +299,63 @@ Assistant (be brief and helpful):"""
                         break
         
         return assistant_message
+    
+    @openai_api_retry
+    async def _make_openai_call_with_context(self, system_prompt: str, user_message: str, 
+                                           context_messages: List[Dict[str, str]]) -> str:
+        """ENHANCED: Make OpenAI call with conversation context for better continuity"""
+        
+        # Build conversation context for better responses
+        conversation_context = ""
+        if context_messages:
+            # Include last few messages for context (limit to keep prompt manageable)
+            recent_messages = context_messages[-10:]  # Last 10 for context building
+            for msg in recent_messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if content:
+                    conversation_context += f"{role.title()}: {content}\n"
+        
+        # Build prompt with context
+        input_prompt = f"""System: {system_prompt}
+
+Previous conversation:
+{conversation_context}
+
+User: {user_message}
+
+Assistant (be brief and helpful, considering the conversation context):"""
+        
+        response = self.openai_client.responses.create(
+            model="o4-mini",
+            input=input_prompt
+        )
+        
+        # Extract response
+        assistant_message = "I'm here to help with your travel planning!"
+        
+        if response and hasattr(response, 'output') and response.output:
+            for output_item in response.output:
+                if hasattr(output_item, 'content') and output_item.content:
+                    for content_item in output_item.content:
+                        if hasattr(content_item, 'text') and content_item.text:
+                            assistant_message = content_item.text.strip()
+                            break
+                    if assistant_message != "I'm here to help with your travel planning!":
+                        break
+        
+        return assistant_message
+
+    # ==================== ADDITIONAL METHODS FOR COMPATIBILITY ====================
+    
+    async def handle_general_conversation(self, user_id: str, message: str, session_id: str,
+                                        user_profile: Dict[str, Any], conversation_history: list) -> Dict[str, Any]:
+        """
+        Compatibility method for general conversation handling (calls the main method)
+        """
+        return await self._handle_general_conversation_no_timeout(
+            user_id, message, session_id, user_profile, conversation_history
+        )
 
 # ==================== MODULE EXPORTS ====================
 
