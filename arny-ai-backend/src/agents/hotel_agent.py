@@ -234,22 +234,16 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
         print(f"📅 Check-in: {check_in_date}, Check-out: {check_out_date}")
         print(f"👥 Adults: {adults}, Rooms: {rooms}")
         
-        # OPTIMIZATION 4: Prepare search parameters for enhanced results
-        search_params = {
-            "destination": destination_code,
-            "checkInDate": check_in_date,
-            "checkOutDate": check_out_date,
-            "adults": adults,
-            "rooms": rooms,
-            "radius": 50,  # 50km radius
-            "radiusUnit": "KM",
-            "hotelSource": "ALL",
-            "max": 50  # ENHANCED: Get up to 50 results for better filtering
-        }
-        
-        # OPTIMIZATION 5: Search hotels using Amadeus API with timeout handling
+        # FIXED: Use correct parameter names for AmadeusService.search_hotels()
         print("🔍 Calling Amadeus Hotel Search API...")
-        hotels_response = await hotel_agent.amadeus_service.search_hotels(**search_params)
+        hotels_response = await hotel_agent.amadeus_service.search_hotels(
+            city_code=destination_code,
+            check_in_date=check_in_date,
+            check_out_date=check_out_date,
+            adults=adults,
+            rooms=rooms,
+            max_results=50  # ENHANCED: Get up to 50 results for better filtering
+        )
         
         if not hotels_response.get("success"):
             return {
@@ -258,7 +252,7 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
                 "message": f"Sorry, I couldn't find hotels in {destination}. Please try a different location or dates."
             }
         
-        raw_hotels = hotels_response.get("data", [])
+        raw_hotels = hotels_response.get("results", [])
         print(f"✅ Amadeus returned {len(raw_hotels)} hotels")
         
         if not raw_hotels:
@@ -266,7 +260,13 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
                 "success": True,
                 "results": [],
                 "message": f"No hotels found in {destination} for {check_in_date} to {check_out_date}. Try different dates?",
-                "search_params": search_params
+                "search_params": {
+                    "city_code": destination_code,
+                    "check_in_date": check_in_date,
+                    "check_out_date": check_out_date,
+                    "adults": adults,
+                    "rooms": rooms
+                }
             }
         
         # OPTIMIZATION 6: Save search to database (non-blocking)
@@ -274,7 +274,7 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
             id=str(uuid.uuid4()),
             user_id=hotel_agent.current_user_id,
             session_id=hotel_agent.current_session_id,
-            destination=destination_code,
+            city_code=destination_code,
             check_in_date=check_in_date,
             check_out_date=check_out_date,
             adults=adults,
@@ -285,7 +285,7 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
         
         # OPTIMIZATION 7: Save to database without blocking the response
         try:
-            await hotel_agent.db.create_hotel_search(hotel_search)
+            await hotel_agent.db.save_hotel_search(hotel_search)
             print(f"💾 Saved hotel search to database: {hotel_search.id}")
         except Exception as e:
             print(f"⚠️ Database save failed (non-critical): {e}")
@@ -294,9 +294,15 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
         print(f"🎯 Applying profile filtering to {len(raw_hotels)} hotels...")
         
         filtering_result = await hotel_agent.profile_agent.filter_hotel_results(
-            hotels=raw_hotels[:50],  # ENHANCED: Process up to 50 hotels
-            user_profile=hotel_agent.user_profile,
-            max_results=10  # ENHANCED: Return up to 10 filtered results
+            user_id=hotel_agent.current_user_id,
+            hotel_results=raw_hotels[:50],  # ENHANCED: Process up to 50 hotels
+            search_params={
+                "city_code": destination_code,
+                "check_in_date": check_in_date,
+                "check_out_date": check_out_date,
+                "adults": adults,
+                "rooms": rooms
+            }
         )
         
         print(f"✅ Profile filtering completed: {len(filtering_result['filtered_results'])} results")
@@ -307,8 +313,8 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
         hotel_agent.latest_filtering_info = {
             "original_count": len(raw_hotels),
             "filtered_count": len(filtering_result["filtered_results"]),
-            "group_size": filtering_result.get("group_size", 1),
-            "rationale": filtering_result["rationale"]
+            "filtering_applied": filtering_result.get("filtering_applied", True),
+            "reasoning": filtering_result.get("reasoning", "Profile-based filtering applied")
         }
         
         # OPTIMIZATION 9: Create enhanced result payload
@@ -316,7 +322,13 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
             "success": True,
             "results": filtering_result["filtered_results"],
             "search_id": hotel_search.id,
-            "search_params": search_params,
+            "search_params": {
+                "city_code": destination_code,
+                "check_in_date": check_in_date,
+                "check_out_date": check_out_date,
+                "adults": adults,
+                "rooms": rooms
+            },
             "filtering_info": hotel_agent.latest_filtering_info
         }
         
