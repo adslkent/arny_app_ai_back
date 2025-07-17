@@ -15,94 +15,16 @@ to handle larger result sets efficiently. Features:
 import json
 import logging
 import asyncio
-import requests
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 from openai import OpenAI
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-    retry_if_exception_message,
-    retry_any,
-    retry_if_result,
-    before_sleep_log,
-    retry_if_exception
-)
-from pydantic import BaseModel, ValidationError
 
 from ..utils.config import config
 from ..database.operations import DatabaseOperations
 
 # Set up logging
 logger = logging.getLogger(__name__)
-
-# ==================== PYDANTIC MODELS FOR VALIDATION ====================
-
-class OpenAIResponse(BaseModel):
-    """Pydantic model for OpenAI response validation"""
-    output: Optional[Any] = None
-
-# ==================== OPENAI API RETRY CONDITIONS ====================
-
-def retry_on_openai_api_error_result(result):
-    """Condition 2: Retry if OpenAI API result contains error/warning fields"""
-    if hasattr(result, 'error') and result.error:
-        return True
-    if isinstance(result, dict):
-        return (
-            result.get("error") is not None or
-            "warning" in result or
-            result.get("success") is False
-        )
-    return False
-
-def retry_on_openai_http_status_error(result):
-    """Condition 1: Retry on HTTP status errors for OpenAI API calls"""
-    if hasattr(result, 'status_code'):
-        return result.status_code >= 400
-    if hasattr(result, 'response') and hasattr(result.response, 'status_code'):
-        return result.response.status_code >= 400
-    return False
-
-def retry_on_openai_validation_failure(result):
-    """Condition 5: Retry if OpenAI result fails Pydantic validation"""
-    try:
-        if result:
-            OpenAIResponse.model_validate(result.__dict__ if hasattr(result, '__dict__') else result)
-        return False
-    except (ValidationError, AttributeError):
-        return True
-
-def retry_on_openai_api_exception(exception):
-    """Condition 4: Custom exception checker for OpenAI API calls"""
-    exception_str = str(exception).lower()
-    return any(keyword in exception_str for keyword in [
-        'timeout', 'failed', 'unavailable', 'rate limit', 'api error',
-        'connection', 'network', 'server error'
-    ])
-
-# OpenAI API retry decorator with all 5 conditions
-openai_api_retry = retry(
-    retry=retry_any(
-        # Condition 3: Exception message matching
-        retry_if_exception_message(match=r".*(timeout|failed|unavailable|rate.limit|api.error|connection|network|server.error).*"),
-        # Condition 4: Exception types and custom checkers
-        retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
-        retry_if_exception(retry_on_openai_api_exception),
-        # Condition 2: Error/warning field inspection
-        retry_if_result(retry_on_openai_api_error_result),
-        # Condition 1: HTTP status code checking
-        retry_if_result(retry_on_openai_http_status_error),
-        # Condition 5: Validation failure
-        retry_if_result(retry_on_openai_validation_failure)
-    ),
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1.5, min=1, max=15),
-    before_sleep=before_sleep_log(logger, logging.WARNING)
-)
 
 class UserProfileAgent:
     """
@@ -141,79 +63,71 @@ class UserProfileAgent:
 
             # OPTIMIZATION 2: Get group profiles - NO TIMEOUT LIMIT, ALL MEMBERS
             try:
-                group_profiles = await self._get_group_profiles_enhanced(user_id)
-                print(f"📊 Retrieved {len(group_profiles)} group profiles - NO MEMBER LIMITS")
+                group_profiles = await self._get_group_profiles(user_id)
             except Exception as e:
-                logger.warning(f"Failed to get group profiles: {e}")
+                print(f"⚠️ Group profile error: {e} - treating as single user")
                 group_profiles = []
             
-            # OPTIMIZATION 3: Direct return if no flights
-            if not flight_results:
+            if not group_profiles:
+                print(f"🔍 No group filtering - single user, returning top 10")
+                # For single users, return top 10 results
+                top_results = flight_results[:10]
                 result = {
-                    "filtered_results": [],
-                    "total_results": 0,
+                    "filtered_results": top_results,
+                    "original_count": len(flight_results),
+                    "filtered_count": len(top_results),
                     "filtering_applied": False,
-                    "reasoning": "No flight results to filter"
+                    "rationale": "Single user - returning top 10 results"
                 }
                 self._filter_cache[cache_key] = result
                 return result
+            
+            print(f"⚡ Group filtering for ALL {len(group_profiles)} members (no limits)")
 
-            # OPTIMIZATION 4: Handle single member (no filtering needed)
-            if len(group_profiles) <= 1:
-                # Return top 10 flights without AI filtering
-                top_flights = flight_results[:10]
+            # ENHANCED: AI filtering with support for up to 50 flights - NO TIMEOUT LIMIT
+            try:
+                filtered_results = await self._ai_filter_flights_enhanced(flight_results, group_profiles)
+                
+                recommended_flights = filtered_results.get("recommended_flights", flight_results[:10])
+                
                 result = {
-                    "filtered_results": top_flights,
-                    "total_results": len(flight_results),
-                    "filtering_applied": False,
-                    "reasoning": "Single traveler - showing best available options"
+                    "filtered_results": recommended_flights,
+                    "original_count": len(flight_results),
+                    "filtered_count": len(recommended_flights),
+                    "filtering_applied": True,
+                    "rationale": filtered_results.get("filtering_rationale", "AI filtering applied (enhanced - no timeouts or member limits)"),
+                    "group_size": len(group_profiles),
                 }
+                
+                # Cache result
                 self._filter_cache[cache_key] = result
+                self._cleanup_cache()
+                
+                print(f"🚀 ENHANCED filtering complete: {len(recommended_flights)} results for {len(group_profiles)} members")
                 return result
-
-            # OPTIMIZATION 5: Enhanced data preparation for larger groups
-            enhanced_flights = self._extract_enhanced_flight_data(flight_results)
-            
-            if not enhanced_flights:
+                
+            except Exception as e:
+                print(f"⚠️ AI filtering error - using top 10 fallback: {e}")
                 result = {
-                    "filtered_results": [],
-                    "total_results": len(flight_results),
+                    "filtered_results": flight_results[:10],
+                    "original_count": len(flight_results),
+                    "filtered_count": min(10, len(flight_results)),
                     "filtering_applied": False,
-                    "reasoning": "Could not process flight data"
+                    "rationale": f"Enhanced fallback used due to error: {str(e)}"
                 }
-                self._filter_cache[cache_key] = result
                 return result
-
-            # OPTIMIZATION 6: Create concise group summary
-            group_summary = self._create_group_summary(group_profiles)
             
-            print(f"🧠 Starting AI filtering for {len(enhanced_flights)} flights with group: {group_summary}")
-
-            # OPTIMIZATION 7: Ultra-efficient AI filtering with NO TIMEOUT LIMITS
-            filtered_result = await self._filter_flights_with_ai_enhanced(
-                enhanced_flights, group_summary, len(group_profiles), flight_results
-            )
-            
-            # Cache and return result
-            self._filter_cache[cache_key] = filtered_result
-            self._cleanup_cache()
-            
-            print(f"✅ ENHANCED flight filtering complete - returned {len(filtered_result.get('filtered_results', []))} flights")
-            return filtered_result
-
         except Exception as e:
-            logger.error(f"Error in enhanced flight filtering: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # Return graceful fallback
+            logger.error(f"Error filtering flight results: {e}")
+            # INSTANT fallback
             return {
-                "filtered_results": flight_results[:10] if flight_results else [],
-                "total_results": len(flight_results) if flight_results else 0,
+                "filtered_results": flight_results[:10],
+                "original_count": len(flight_results),
+                "filtered_count": min(10, len(flight_results)),
                 "filtering_applied": False,
-                "reasoning": f"Filtering failed: {str(e)}"
+                "rationale": f"Instant fallback: {str(e)}"
             }
-
+    
     async def filter_hotel_results(self, user_id: str, hotel_results: List[Dict[str, Any]], 
                                  search_params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -232,80 +146,72 @@ class UserProfileAgent:
 
             # OPTIMIZATION 2: Get group profiles - NO TIMEOUT LIMIT, ALL MEMBERS
             try:
-                group_profiles = await self._get_group_profiles_enhanced(user_id)
-                print(f"📊 Retrieved {len(group_profiles)} group profiles - NO MEMBER LIMITS")
+                group_profiles = await self._get_group_profiles(user_id)
             except Exception as e:
-                logger.warning(f"Failed to get group profiles: {e}")
+                print(f"⚠️ Group profile error: {e} - treating as single user")
                 group_profiles = []
-
-            # OPTIMIZATION 3: Direct return if no hotels
-            if not hotel_results:
+            
+            if not group_profiles:
+                print(f"🔍 No group filtering - single user, returning top 10")
+                # For single users, return top 10 results
+                top_results = hotel_results[:10]
                 result = {
-                    "filtered_results": [],
-                    "total_results": 0,
+                    "filtered_results": top_results,
+                    "original_count": len(hotel_results),
+                    "filtered_count": len(top_results),
                     "filtering_applied": False,
-                    "reasoning": "No hotel results to filter"
+                    "rationale": "Single user - returning top 10 results"
                 }
                 self._filter_cache[cache_key] = result
                 return result
+            
+            print(f"⚡ Group filtering for ALL {len(group_profiles)} members (no limits)")
 
-            # OPTIMIZATION 4: Handle single member (no filtering needed)
-            if len(group_profiles) <= 1:
-                # Return top 10 hotels without AI filtering
-                top_hotels = hotel_results[:10]
+            # ENHANCED: AI filtering with support for up to 50 hotels - NO TIMEOUT LIMIT
+            try:
+                filtered_results = await self._ai_filter_hotels_enhanced(hotel_results, group_profiles)
+                
+                recommended_hotels = filtered_results.get("recommended_hotels", hotel_results[:10])
+                
                 result = {
-                    "filtered_results": top_hotels,
-                    "total_results": len(hotel_results),
-                    "filtering_applied": False,
-                    "reasoning": "Single traveler - showing best available options"
+                    "filtered_results": recommended_hotels,
+                    "original_count": len(hotel_results),
+                    "filtered_count": len(recommended_hotels),
+                    "filtering_applied": True,
+                    "rationale": filtered_results.get("filtering_rationale", "AI filtering applied (enhanced - no timeouts or member limits)"),
+                    "group_size": len(group_profiles),
                 }
+                
+                # Cache result
                 self._filter_cache[cache_key] = result
+                self._cleanup_cache()
+                
+                print(f"🚀 ENHANCED filtering complete: {len(recommended_hotels)} results for {len(group_profiles)} members")
                 return result
-
-            # OPTIMIZATION 5: Enhanced data preparation for larger groups
-            enhanced_hotels = self._extract_enhanced_hotel_data(hotel_results)
-            
-            if not enhanced_hotels:
+                
+            except Exception as e:
+                print(f"⚠️ AI filtering error - using top 10 fallback: {e}")
                 result = {
-                    "filtered_results": [],
-                    "total_results": len(hotel_results),
+                    "filtered_results": hotel_results[:10],
+                    "original_count": len(hotel_results),
+                    "filtered_count": min(10, len(hotel_results)),
                     "filtering_applied": False,
-                    "reasoning": "Could not process hotel data"
+                    "rationale": f"Enhanced fallback used due to error: {str(e)}"
                 }
-                self._filter_cache[cache_key] = result
                 return result
-
-            # OPTIMIZATION 6: Create concise group summary
-            group_summary = self._create_group_summary(group_profiles)
             
-            print(f"🧠 Starting AI filtering for {len(enhanced_hotels)} hotels with group: {group_summary}")
-
-            # OPTIMIZATION 7: Ultra-efficient AI filtering with NO TIMEOUT LIMITS
-            filtered_result = await self._filter_hotels_with_ai_enhanced(
-                enhanced_hotels, group_summary, len(group_profiles), hotel_results
-            )
-            
-            # Cache and return result
-            self._filter_cache[cache_key] = filtered_result
-            self._cleanup_cache()
-            
-            print(f"✅ ENHANCED hotel filtering complete - returned {len(filtered_result.get('filtered_results', []))} hotels")
-            return filtered_result
-
         except Exception as e:
-            logger.error(f"Error in enhanced hotel filtering: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # Return graceful fallback
+            logger.error(f"Error filtering hotel results: {e}")
+            # INSTANT fallback
             return {
-                "filtered_results": hotel_results[:10] if hotel_results else [],
-                "total_results": len(hotel_results) if hotel_results else 0,
+                "filtered_results": hotel_results[:10],
+                "original_count": len(hotel_results),
+                "filtered_count": min(10, len(hotel_results)),
                 "filtering_applied": False,
-                "reasoning": f"Filtering failed: {str(e)}"
+                "rationale": f"Instant fallback: {str(e)}"
             }
-
-    async def _get_group_profiles_enhanced(self, user_id: str) -> List[Dict[str, Any]]:
+    
+    async def _get_group_profiles(self, user_id: str) -> List[Dict[str, Any]]:
         """Get group profiles with optimized processing - NO TIMEOUTS OR MEMBER LIMITS"""
         try:
             # Get user's groups
@@ -360,17 +266,14 @@ class UserProfileAgent:
                     if segments:
                         first_segment = segments[0]
                         enhanced_flight.update({
-                            "departure_time": first_segment.get("departure", {}).get("at", ""),
-                            "arrival_time": segments[-1].get("arrival", {}).get("at", "") if segments else "",
                             "airline": first_segment.get("carrierCode", ""),
-                            "duration": first_itinerary.get("duration", ""),
-                            "stops": len(segments) - 1
+                            "stops": len(segments) - 1,
+                            "duration": first_itinerary.get("duration", "")
                         })
                 
                 enhanced_flights.append(enhanced_flight)
                 
-            except Exception as e:
-                logger.warning(f"Error extracting flight {i}: {e}")
+            except Exception:
                 continue
         
         return enhanced_flights
@@ -380,54 +283,47 @@ class UserProfileAgent:
         enhanced_hotels = []
         
         # Process all hotels but optimize data extraction
-        for i, hotel in enumerate(hotels[:50]):  # CHANGED: Process up to 50 hotels
+        for i, hotel_data in enumerate(hotels[:50]):  # CHANGED: Process up to 50 hotels
             try:
-                hotel_data = hotel.get("hotel", {})
-                offers = hotel.get("offers", [])
+                hotel = hotel_data.get("hotel", {})
+                offers = hotel_data.get("offers", [])
                 
                 enhanced_hotel = {
                     "id": i + 1,
-                    "name": hotel_data.get("name", ""),
-                    "rating": hotel_data.get("rating", ""),
+                    "name": hotel.get("name", "Hotel"),
+                    "rating": hotel.get("rating", ""),
                 }
                 
-                if offers and len(offers) > 0:
-                    first_offer = offers[0]
-                    price = first_offer.get("price", {})
-                    room = first_offer.get("room", {})
-                    
+                if offers:
+                    best_offer = offers[0]
+                    price = best_offer.get("price", {})
                     enhanced_hotel.update({
                         "price": price.get("total", "N/A"),
                         "currency": price.get("currency", ""),
-                        "room_type": room.get("type", ""),
-                        "beds": room.get("typeEstimated", {}).get("beds", ""),
-                        "check_in": first_offer.get("checkInDate", ""),
-                        "check_out": first_offer.get("checkOutDate", "")
                     })
                 
                 enhanced_hotels.append(enhanced_hotel)
                 
-            except Exception as e:
-                logger.warning(f"Error extracting hotel {i}: {e}")
+            except Exception:
                 continue
         
         return enhanced_hotels
-
-    @openai_api_retry
-    async def _filter_flights_with_ai_enhanced(self, enhanced_flights: List[Dict[str, Any]], 
-                                             group_summary: str, group_size: int, 
-                                             original_flights: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """ENHANCED: Use AI to filter flights optimized for larger groups - NO TIMEOUT LIMITS with Tenacity retry strategies"""
-        
+    
+    async def _ai_filter_flights_enhanced(self, flight_results: List[Dict[str, Any]], 
+                                         group_profiles: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """ENHANCED: AI flight filtering with support for larger datasets - NO TIMEOUT LIMITS, ALL MEMBERS"""
         try:
-            print(f"🧠 AI filtering {len(enhanced_flights)} flights for group: {group_summary}")
+            # Extract enhanced data for all flights
+            enhanced_flights = self._extract_enhanced_flight_data(flight_results)
             
-            # Ultra-short prompt for efficiency
-            prompt = f"""Filter flights for group: {group_summary}
+            # ENHANCED: Create efficient prompt for larger datasets with ALL group members
+            group_summary = self._create_group_summary_for_ai(group_profiles)
+            
+            prompt = f"""Filter {len(enhanced_flights)} flights for group of {len(group_profiles)} members.
 
 Group details: {group_summary}
 
-Return top 10 flights as JSON: {{"recommended_flights": [{{"id": 1}}, {{"id": 2}}, ...], "filtering_rationale": "brief reason considering all {group_size} members"}}
+Return top 10 flights as JSON: {{"recommended_flights": [{{\"id\": 1}}, {{\"id\": 2}}, ...], "filtering_rationale": "brief reason considering all {len(group_profiles)} members"}}
 
 Flights: {json.dumps(enhanced_flights[:20])}...and {max(0, len(enhanced_flights)-20)} more"""
 
@@ -459,60 +355,49 @@ Flights: {json.dumps(enhanced_flights[:20])}...and {max(0, len(enhanced_flights)
                     
                     # Map back to original flights (up to 10)
                     recommended_ids = [f.get("id", 0) for f in filtered_result.get("recommended_flights", [])]
-                    original_flights_filtered = [original_flights[i-1] for i in recommended_ids if 1 <= i <= len(original_flights)]
+                    original_flights = [flight_results[i-1] for i in recommended_ids if 1 <= i <= len(flight_results)]
                     
                     # Ensure we return up to 10 results
-                    if len(original_flights_filtered) > 10:
-                        original_flights_filtered = original_flights_filtered[:10]
+                    if len(original_flights) > 10:
+                        original_flights = original_flights[:10]
+                    elif len(original_flights) < 10 and len(flight_results) >= 10:
+                        # Fill up to 10 with top results if AI didn't return enough
+                        original_flights = flight_results[:10]
                     
-                    print(f"✅ AI filtered to {len(original_flights_filtered)} flights")
+                    filtered_result["recommended_flights"] = original_flights
+                    return filtered_result
+                else:
+                    raise ValueError("No JSON found")
                     
-                    return {
-                        "filtered_results": original_flights_filtered,
-                        "total_results": len(enhanced_flights),
-                        "filtering_applied": True,
-                        "reasoning": filtered_result.get("filtering_rationale", "AI filtering applied")
-                    }
+            except Exception:
+                # Enhanced fallback - return top 10
+                return {
+                    "recommended_flights": flight_results[:10],
+                    "filtering_rationale": f"Enhanced fallback - top 10 results for {len(group_profiles)} members"
+                }
                 
-            except json.JSONDecodeError as e:
-                print(f"⚠️ JSON parsing failed: {e}")
-            
-            # Fallback: return top 10 flights
-            print(f"⚠️ AI filtering fallback - returning top 10 of {len(original_flights)} flights")
+        except Exception:
+            # Enhanced fallback - return top 10
             return {
-                "filtered_results": original_flights[:10],
-                "total_results": len(enhanced_flights),
-                "filtering_applied": False,
-                "reasoning": "AI filtering failed, showing top options"
+                "recommended_flights": flight_results[:10],
+                "filtering_rationale": f"Enhanced fallback - top 10 results for {len(group_profiles)} members"
             }
-            
-        except Exception as e:
-            logger.error(f"Error in AI flight filtering: {e}")
-            print(f"❌ AI filtering error: {e}")
-            
-            # Graceful fallback
-            return {
-                "filtered_results": original_flights[:10] if original_flights else [],
-                "total_results": len(enhanced_flights),
-                "filtering_applied": False,
-                "reasoning": f"AI filtering error: {str(e)}"
-            }
-
-    @openai_api_retry
-    async def _filter_hotels_with_ai_enhanced(self, enhanced_hotels: List[Dict[str, Any]], 
-                                            group_summary: str, group_size: int,
-                                            hotel_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """ENHANCED: Use AI to filter hotels optimized for larger groups - NO TIMEOUT LIMITS with Tenacity retry strategies"""
-        
+    
+    async def _ai_filter_hotels_enhanced(self, hotel_results: List[Dict[str, Any]], 
+                                        group_profiles: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """ENHANCED: AI hotel filtering with support for larger datasets - NO TIMEOUT LIMITS, ALL MEMBERS"""
         try:
-            print(f"🧠 AI filtering {len(enhanced_hotels)} hotels for group: {group_summary}")
+            # Extract enhanced data for all hotels
+            enhanced_hotels = self._extract_enhanced_hotel_data(hotel_results)
             
-            # Ultra-short prompt for efficiency
-            prompt = f"""Filter hotels for group: {group_summary}
+            # ENHANCED: Create efficient prompt for larger datasets with ALL group members
+            group_summary = self._create_group_summary_for_ai(group_profiles)
+            
+            prompt = f"""Filter {len(enhanced_hotels)} hotels for group of {len(group_profiles)} members.
 
 Group details: {group_summary}
 
-Return top 10 hotels as JSON: {{"recommended_hotels": [{{"id": 1}}, {{"id": 2}}, ...], "filtering_rationale": "brief reason considering all {group_size} members"}}
+Return top 10 hotels as JSON: {{"recommended_hotels": [{{\"id\": 1}}, {{\"id\": 2}}, ...], "filtering_rationale": "brief reason considering all {len(group_profiles)} members"}}
 
 Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20)} more"""
 
@@ -549,55 +434,46 @@ Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20
                     # Ensure we return up to 10 results
                     if len(original_hotels) > 10:
                         original_hotels = original_hotels[:10]
+                    elif len(original_hotels) < 10 and len(hotel_results) >= 10:
+                        # Fill up to 10 with top results if AI didn't return enough
+                        original_hotels = hotel_results[:10]
                     
-                    print(f"✅ AI filtered to {len(original_hotels)} hotels")
+                    filtered_result["recommended_hotels"] = original_hotels
+                    return filtered_result
+                else:
+                    raise ValueError("No JSON found")
                     
-                    return {
-                        "filtered_results": original_hotels,
-                        "total_results": len(enhanced_hotels),
-                        "filtering_applied": True,
-                        "reasoning": filtered_result.get("filtering_rationale", "AI filtering applied")
-                    }
+            except Exception:
+                # Enhanced fallback - return top 10
+                return {
+                    "recommended_hotels": hotel_results[:10],
+                    "filtering_rationale": f"Enhanced fallback - top 10 results for {len(group_profiles)} members"
+                }
                 
-            except json.JSONDecodeError as e:
-                print(f"⚠️ JSON parsing failed: {e}")
-            
-            # Fallback: return top 10 hotels
-            print(f"⚠️ AI filtering fallback - returning top 10 of {len(hotel_results)} hotels")
+        except Exception:
+            # Enhanced fallback - return top 10
             return {
-                "filtered_results": hotel_results[:10],
-                "total_results": len(enhanced_hotels),
-                "filtering_applied": False,
-                "reasoning": "AI filtering failed, showing top options"
-            }
-            
-        except Exception as e:
-            logger.error(f"Error in AI hotel filtering: {e}")
-            print(f"❌ AI filtering error: {e}")
-            
-            # Graceful fallback
-            return {
-                "filtered_results": hotel_results[:10] if hotel_results else [],
-                "total_results": len(enhanced_hotels),
-                "filtering_applied": False,
-                "reasoning": f"AI filtering error: {str(e)}"
+                "recommended_hotels": hotel_results[:10],
+                "filtering_rationale": f"Enhanced fallback - top 10 results for {len(group_profiles)} members"
             }
     
-    def _create_group_summary(self, group_profiles: List[Dict[str, Any]]) -> str:
-        """Create a concise summary of group preferences for AI filtering"""
+    def _create_group_summary_for_ai(self, group_profiles: List[Dict[str, Any]]) -> str:
+        """NEW: Create a concise summary of ALL group members for AI processing"""
         try:
             if not group_profiles:
-                return "single traveler"
+                return "Single traveler"
             
-            # Extract key information
+            # Extract key information from all profiles
             travel_styles = []
-            ages = []
             cities = []
+            ages = []
             
             for profile in group_profiles:
+                # Travel style
                 if profile.get("travel_style"):
                     travel_styles.append(profile["travel_style"])
                 
+                # City
                 if profile.get("city"):
                     cities.append(profile["city"])
                 
