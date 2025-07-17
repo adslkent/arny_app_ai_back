@@ -43,16 +43,15 @@ custom:
   pythonRequirements:
     dockerizePip: true
     layer: true
-    slim: false  # CHANGED: Disabled slim to prevent stripping of package metadata
+    slim: false  # IMPORTANT: Disabled to prevent stripping of package metadata
     strip: false
-    # ADDED: Explicitly include problematic packages
     staticCacheMaxVersions: 0
     useDownloadCache: false
-    # ADDED: Specify packages that should not be zipped
+    # Exclude AWS SDK to reduce package size
     noDeploy:
       - boto3
       - botocore
-    # ADDED: Include packages that might have metadata issues
+    # Force reinstall to avoid cache issues
     pipCmdExtraArgs:
       - --no-cache-dir
       - --force-reinstall
@@ -113,7 +112,6 @@ functions:
     handler: src/main.lambda_handler
     timeout: 900  # 15 minutes for Function URL (max allowed)
     memorySize: 1536  # Increased memory for better performance
-    # REMOVED: reservedConcurrency to avoid account limit issues
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
     # Function URL configuration - NO API Gateway events
@@ -151,34 +149,6 @@ functions:
           method: get
           cors: true
 
-# AWS resources
-resources:
-  Resources:
-    # Configure CORS for API Gateway
-    GatewayResponseDefault4XX:
-      Type: 'AWS::ApiGateway::GatewayResponse'
-      Properties:
-        ResponseParameters:
-          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
-          gatewayresponse.header.Access-Control-Allow-Headers: "'*'"
-          gatewayresponse.header.Access-Control-Allow-Methods: "'*'"
-        ResponseType: DEFAULT_4XX
-        RestApiId:
-          Ref: 'RestApiApigEvent'
-        StatusCode: '404'
-    
-    GatewayResponseDefault5XX:
-      Type: 'AWS::ApiGateway::GatewayResponse'
-      Properties:
-        ResponseParameters:
-          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
-          gatewayresponse.header.Access-Control-Allow-Headers: "'*'"
-          gatewayresponse.header.Access-Control-Allow-Methods: "'*'"
-        ResponseType: DEFAULT_5XX
-        RestApiId:
-          Ref: 'RestApiApigEvent'
-        StatusCode: '500'
-
 # Package configuration
 package:
   patterns:
@@ -191,3 +161,5 @@ package:
     - '!tests/**'
     - '!.env'
     - '!README.md'
+    - '!verify_fix.py'
+    - '!deploy_fix.sh'
