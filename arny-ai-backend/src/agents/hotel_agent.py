@@ -166,11 +166,8 @@ def get_hotel_system_message() -> str:
     """
     Generate enhanced hotel search assistant system prompt
     """
-    # Get current date
     today = datetime.now().strftime("%Y-%m-%d")
-    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
     
-    # Enhanced system message for better hotel search
     system_message = f"""You are Arny's professional hotel search assistant. Today is {today}.
 
 Your task: Use search_hotels_tool to find hotels with dates and pricing for users.
@@ -181,11 +178,12 @@ Key rules:
 3. Convert city names to codes: NYC, LON, PAR, etc.
 4. DEFAULT: adults=1, rooms=1
 5. NEVER call the same tool twice with different city variations
-6. Present results clearly with hotel names, ratings, and prices
+6. **IMPORTANT: Present ALL filtered hotel results in your response - do not truncate the list**
+7. Show hotel names, ratings, and prices for ALL results
 
 Example: "Hotels in New York July 15-18" → search_hotels_tool(destination="New York", check_in_date="2025-07-15", check_out_date="2025-07-18")
 
-Be professional and helpful. Provide comprehensive hotel options."""
+Be professional and helpful. Provide comprehensive hotel options showing ALL available results."""
     
     return system_message
 
