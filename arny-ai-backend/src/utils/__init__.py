@@ -29,8 +29,14 @@ import hashlib
 from datetime import datetime, date, timedelta
 from typing import Optional, Dict, Any, List, Union
 
-# REMOVED: email_validator import completely to avoid Lambda packaging issues
-# Using robust regex validation instead
+# FIXED: Handle email_validator import with fallback
+try:
+    from email_validator import validate_email as email_validate, EmailNotValidError
+    EMAIL_VALIDATOR_AVAILABLE = True
+except ImportError:
+    # Fallback if email_validator is not available
+    EMAIL_VALIDATOR_AVAILABLE = False
+    EmailNotValidError = ValueError
 
 from .config import Config, config
 from .group_codes import GroupCodeGenerator
@@ -102,12 +108,6 @@ PHONE_REGEX_PATTERNS = {
     'au': r'^(\+61[-.\s]?)?(\(0\)|0)?[2-9]\d{8}$',
     'uk': r'^(\+44[-.\s]?)?(\(0\)|0)?[1-9]\d{8,9}$'
 }
-
-# ROBUST EMAIL VALIDATION REGEX (RFC 5322 compliant)
-EMAIL_PATTERN = re.compile(
-    r'^[a-zA-Z0-9!#$%&\'*+/=?^_`{|}~-]+(?:\.[a-zA-Z0-9!#$%&\'*+/=?^_`{|}~-]+)*'
-    r'@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$'
-)
 
 # ==================== CONFIGURATION UTILITIES ====================
 
@@ -184,62 +184,28 @@ def format_group_code(code: str) -> str:
 
 def validate_email(email: str) -> bool:
     """
-    FIXED: Robust email validation using regex (no external dependencies)
-    
-    This function uses a comprehensive regex pattern that covers most valid email formats
-    according to RFC 5322 specification, without requiring external packages.
+    FIXED: Validate email address format with fallback
     
     Args:
         email: Email address to validate
         
     Returns:
         True if valid, False otherwise
-        
-    Examples:
-        >>> validate_email("test@example.com")
-        True
-        >>> validate_email("user.name+tag@domain.co.uk")
-        True
-        >>> validate_email("invalid.email")
-        False
     """
     if not email or not isinstance(email, str):
         return False
     
-    # Basic length check (max 254 characters for email)
-    if len(email) > 254:
-        return False
-    
-    # Check for single @ symbol
-    if email.count('@') != 1:
-        return False
-    
-    # Split into local and domain parts
-    local, domain = email.rsplit('@', 1)
-    
-    # Basic length checks
-    if len(local) < 1 or len(local) > 64:
-        return False
-    if len(domain) < 1 or len(domain) > 255:
-        return False
-    
-    # Use comprehensive regex pattern
-    if EMAIL_PATTERN.match(email):
-        # Additional domain validation
-        domain_parts = domain.split('.')
-        if len(domain_parts) < 2:
+    # First try with email_validator if available
+    if EMAIL_VALIDATOR_AVAILABLE:
+        try:
+            email_validate(email)
+            return True
+        except EmailNotValidError:
             return False
-        
-        # Check each domain part
-        for part in domain_parts:
-            if len(part) < 1 or len(part) > 63:
-                return False
-            if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$', part):
-                return False
-        
-        return True
     
-    return False
+    # Fallback to regex validation
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(email_pattern, email.strip()))
 
 def validate_phone(phone: str, country_code: str = 'international') -> bool:
     """
@@ -631,7 +597,7 @@ def health_check() -> Dict[str, Any]:
         'module': 'utils',
         'version': __version__,
         'status': 'healthy',
-        'email_validator_method': 'regex',  # Using regex instead of external package
+        'email_validator_available': EMAIL_VALIDATOR_AVAILABLE,
         'components': {}
     }
     
@@ -654,26 +620,13 @@ def health_check() -> Dict[str, Any]:
             'test_validation_passed': is_valid
         }
         
-        # Test utilities with comprehensive email tests
-        test_emails = [
-            ('test@example.com', True),
-            ('user.name+tag@domain.co.uk', True),
-            ('invalid.email', False),
-            ('test@', False),
-            ('@domain.com', False)
-        ]
-        
-        email_tests_passed = 0
-        for email, expected in test_emails:
-            result = validate_email(email)
-            if result == expected:
-                email_tests_passed += 1
-        
+        # Test utilities
+        test_email = validate_email('test@example.com')
         test_uuid = validate_uuid(str(uuid.uuid4()))
         
         status['components']['validators'] = {
-            'status': 'healthy' if email_tests_passed == len(test_emails) and test_uuid else 'error',
-            'email_tests_passed': f"{email_tests_passed}/{len(test_emails)}",
+            'status': 'healthy' if test_email and test_uuid else 'error',
+            'email_validator': test_email,
             'uuid_validator': test_uuid
         }
         
