@@ -7,127 +7,12 @@ from enum import Enum
 
 from openai import OpenAI
 from agents import Agent, Runner, function_tool
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-    retry_if_exception_message,
-    retry_any,
-    retry_if_result,
-    before_sleep_log,
-    retry_if_exception
-)
-from pydantic import BaseModel, ValidationError
-import logging
-import requests
 
 from ..utils.config import config
 from ..utils.group_codes import GroupCodeGenerator
 from ..services.email_service import EmailService
 from ..database.operations import DatabaseOperations
 from ..database.models import OnboardingStep, OnboardingProgress
-
-# Set up logging
-logger = logging.getLogger(__name__)
-
-# ==================== PYDANTIC MODELS FOR VALIDATION ====================
-
-class OpenAIResponse(BaseModel):
-    """Pydantic model for OpenAI response validation"""
-    output: Optional[Any] = None
-
-class AgentRunnerResponse(BaseModel):
-    """Pydantic model for Agent Runner response validation"""
-    final_output: Optional[str] = None
-
-# ==================== OPENAI API RETRY CONDITIONS ====================
-
-def retry_on_openai_api_error_result(result):
-    """Condition 2: Retry if OpenAI API result contains error/warning fields"""
-    if hasattr(result, 'error') and result.error:
-        return True
-    if isinstance(result, dict):
-        return (
-            result.get("error") is not None or
-            "warning" in result or
-            result.get("success") is False
-        )
-    return False
-
-def retry_on_openai_http_status_error(result):
-    """Condition 1: Retry on HTTP status errors for OpenAI API calls"""
-    if hasattr(result, 'status_code'):
-        return result.status_code >= 400
-    if hasattr(result, 'response') and hasattr(result.response, 'status_code'):
-        return result.response.status_code >= 400
-    return False
-
-def retry_on_openai_validation_failure(result):
-    """Condition 5: Retry if OpenAI result fails Pydantic validation"""
-    try:
-        if result:
-            OpenAIResponse.model_validate(result.__dict__ if hasattr(result, '__dict__') else result)
-        return False
-    except (ValidationError, AttributeError):
-        return True
-
-def retry_on_agent_runner_validation_failure(result):
-    """Condition 5: Retry if Agent Runner result fails Pydantic validation"""
-    try:
-        if result:
-            AgentRunnerResponse.model_validate(result.__dict__ if hasattr(result, '__dict__') else result)
-        return False
-    except (ValidationError, AttributeError):
-        return True
-
-def retry_on_openai_api_exception(exception):
-    """Condition 4: Custom exception checker for OpenAI API calls"""
-    exception_str = str(exception).lower()
-    return any(keyword in exception_str for keyword in [
-        'timeout', 'failed', 'unavailable', 'rate limit', 'api error',
-        'connection', 'network', 'server error'
-    ])
-
-# OpenAI Responses API retry decorator with all 5 conditions
-openai_responses_api_retry = retry(
-    retry=retry_any(
-        # Condition 3: Exception message matching
-        retry_if_exception_message(match=r".*(timeout|failed|unavailable|rate.limit|api.error|connection|network|server.error).*"),
-        # Condition 4: Exception types and custom checkers
-        retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
-        retry_if_exception(retry_on_openai_api_exception),
-        # Condition 2: Error/warning field inspection
-        retry_if_result(retry_on_openai_api_error_result),
-        # Condition 1: HTTP status code checking
-        retry_if_result(retry_on_openai_http_status_error),
-        # Condition 5: Validation failure
-        retry_if_result(retry_on_openai_validation_failure)
-    ),
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1.5, min=1, max=15),
-    before_sleep=before_sleep_log(logger, logging.WARNING)
-)
-
-# OpenAI Agents SDK retry decorator with all 5 conditions
-openai_agents_sdk_retry = retry(
-    retry=retry_any(
-        # Condition 3: Exception message matching
-        retry_if_exception_message(match=r".*(timeout|failed|unavailable|rate.limit|api.error|connection|network|server.error).*"),
-        # Condition 4: Exception types and custom checkers
-        retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
-        retry_if_exception(retry_on_openai_api_exception),
-        # Condition 2: Error/warning field inspection
-        retry_if_result(retry_on_openai_api_error_result),
-        # Condition 1: HTTP status code checking
-        retry_if_result(retry_on_openai_http_status_error),
-        # Condition 5: Validation failure
-        retry_if_result(retry_on_agent_runner_validation_failure)
-    ),
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1.5, min=1, max=15),
-    before_sleep=before_sleep_log(logger, logging.WARNING)
-)
 
 # Global variable to store the current agent instance
 _current_onboarding_agent = None
@@ -196,275 +81,433 @@ def scan_email_for_profile_tool(email: str) -> dict:
                 "message": "I couldn't scan your email automatically. Let me ask for your information manually instead."
             }
         
-        # Update collected data with successful scan results
-        scan_data = profile_data.get("data", {})
-        
-        # Update collected data
-        if scan_data.get("name"):
-            agent.current_collected_data["name"] = scan_data["name"]
-        if scan_data.get("gender"):
-            agent.current_collected_data["gender"] = scan_data["gender"]
-        if scan_data.get("birthdate"):
-            agent.current_collected_data["birthdate"] = scan_data["birthdate"]
-        if scan_data.get("city"):
-            agent.current_collected_data["city"] = scan_data["city"]
-        
-        print(f"✅ Profile updated with scanned data: {agent.current_collected_data}")
+        # Store any found profile data in collected data
+        if profile_data.get("success"):
+            if profile_data.get("name"):
+                agent.current_collected_data["name"] = profile_data["name"]
+            if profile_data.get("gender"):
+                agent.current_collected_data["gender"] = profile_data["gender"]
+            if profile_data.get("birthdate"):
+                agent.current_collected_data["birthdate"] = profile_data["birthdate"]
+            if profile_data.get("city"):
+                agent.current_collected_data["city"] = profile_data["city"]
         
         return {
-            "name": scan_data.get("name"),
-            "gender": scan_data.get("gender"),
-            "birthdate": scan_data.get("birthdate"),
-            "city": scan_data.get("city"),
-            "success": True,
-            "message": "Successfully scanned your email for profile information!"
+            "name": profile_data.get("name"),
+            "gender": profile_data.get("gender"),
+            "birthdate": profile_data.get("birthdate"),
+            "city": profile_data.get("city"),
+            "success": profile_data.get("success", False),
+            "error": profile_data.get("error")
         }
         
     except Exception as e:
-        print(f"❌ Error in scan_email_for_profile_tool: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return {"success": False, "error": str(e)}
+        print(f"Error in scan_email_for_profile_tool: {str(e)}")
+        return {
+            "name": None,
+            "gender": None,
+            "birthdate": None,
+            "city": None,
+            "success": False,
+            "error": str(e),
+            "message": "I encountered an error scanning your email. Let me ask for your information manually instead."
+        }
 
 @function_tool
-def store_personal_info_tool(name: str, gender: str, birthdate: str, city: str) -> dict:
-    """Store user's personal information"""
+def store_personal_info_tool(name: str = None, gender: str = None, birthdate: str = None, city: str = None) -> dict:
+    """
+    Store personal information from user input
+    
+    Args:
+        name: User's full name
+        gender: User's gender 
+        birthdate: User's birthdate in YYYY-MM-DD format
+        city: User's city
+        
+    Returns:
+        Dict with success status and stored information
+    """
     try:
         agent = _get_onboarding_agent()
         if not agent:
-            return {"error": "Agent not available"}
+            return {"success": False, "error": "Agent not available"}
         
-        print(f"👤 Storing personal info: {name}, {gender}, {birthdate}, {city}")
+        print(f"💾 Storing personal info: name={name}, gender={gender}, birthdate={birthdate}, city={city}")
         
-        # Store in current collected data
-        agent.current_collected_data.update({
-            "name": name,
-            "gender": gender,
-            "birthdate": birthdate,
-            "city": city
-        })
+        # Store non-empty values in collected data
+        if name:
+            agent.current_collected_data["name"] = name
+        if gender:
+            agent.current_collected_data["gender"] = gender
+        if birthdate:
+            agent.current_collected_data["birthdate"] = birthdate
+        if city:
+            agent.current_collected_data["city"] = city
         
-        print(f"✅ Personal info stored")
-        return {"success": True, "message": "Personal information stored successfully!"}
+        print(f"📈 Updated collected data: {agent.current_collected_data}")
+        
+        # Check what we have collected so far
+        collected_fields = []
+        if agent.current_collected_data.get("name"):
+            collected_fields.append(f"name: {agent.current_collected_data['name']}")
+        if agent.current_collected_data.get("gender"):
+            collected_fields.append(f"gender: {agent.current_collected_data['gender']}")
+        if agent.current_collected_data.get("birthdate"):
+            collected_fields.append(f"birthdate: {agent.current_collected_data['birthdate']}")
+        if agent.current_collected_data.get("city"):
+            collected_fields.append(f"city: {agent.current_collected_data['city']}")
+        
+        return {
+            "success": True,
+            "message": f"Stored personal information: {', '.join(collected_fields)}",
+            "collected_fields": collected_fields
+        }
         
     except Exception as e:
-        print(f"❌ Error in store_personal_info_tool: {str(e)}")
+        print(f"Error in store_personal_info_tool: {str(e)}")
         return {"success": False, "error": str(e)}
 
 @function_tool
-def store_job_details_tool(employer: str, working_schedule: str, holiday_frequency: str) -> dict:
-    """Store user's job details"""
+def store_job_details_tool(employer: str = None, working_schedule: str = None, holiday_frequency: str = None) -> dict:
+    """
+    Store job details from user input
+    
+    Args:
+        employer: User's employer/company name
+        working_schedule: User's working schedule
+        holiday_frequency: How often user takes holidays per year
+        
+    Returns:
+        Dict with success status and stored information
+    """
     try:
         agent = _get_onboarding_agent()
         if not agent:
-            return {"error": "Agent not available"}
+            return {"success": False, "error": "Agent not available"}
         
-        print(f"💼 Storing job details: {employer}, {working_schedule}, {holiday_frequency}")
+        print(f"💼 Storing job details: employer={employer}, schedule={working_schedule}, holidays={holiday_frequency}")
         
-        # Store in current collected data
-        agent.current_collected_data.update({
-            "employer": employer,
-            "working_schedule": working_schedule,
-            "holiday_frequency": holiday_frequency
-        })
+        # Store non-empty values in collected data
+        if employer:
+            agent.current_collected_data["employer"] = employer
+        if working_schedule:
+            agent.current_collected_data["working_schedule"] = working_schedule
+        if holiday_frequency:
+            agent.current_collected_data["holiday_frequency"] = holiday_frequency
         
-        print(f"✅ Job details stored")
-        return {"success": True, "message": "Job details stored successfully!"}
+        print(f"📈 Updated collected data: {agent.current_collected_data}")
+        
+        # Check what we have collected so far
+        collected_fields = []
+        if agent.current_collected_data.get("employer"):
+            collected_fields.append(f"employer: {agent.current_collected_data['employer']}")
+        if agent.current_collected_data.get("working_schedule"):
+            collected_fields.append(f"schedule: {agent.current_collected_data['working_schedule']}")
+        if agent.current_collected_data.get("holiday_frequency"):
+            collected_fields.append(f"holidays: {agent.current_collected_data['holiday_frequency']}")
+        
+        return {
+            "success": True,
+            "message": f"Stored job details: {', '.join(collected_fields)}",
+            "collected_fields": collected_fields
+        }
         
     except Exception as e:
-        print(f"❌ Error in store_job_details_tool: {str(e)}")
+        print(f"Error in store_job_details_tool: {str(e)}")
         return {"success": False, "error": str(e)}
 
 @function_tool
-def store_financial_info_tool(annual_income: str, monthly_spending: str) -> dict:
-    """Store user's financial information"""
+def store_financial_info_tool(annual_income: str = None, monthly_spending: str = None) -> dict:
+    """
+    Store financial information from user input
+    
+    Args:
+        annual_income: User's annual income range
+        monthly_spending: User's average monthly spending
+        
+    Returns:
+        Dict with success status and stored information
+    """
     try:
         agent = _get_onboarding_agent()
         if not agent:
-            return {"error": "Agent not available"}
+            return {"success": False, "error": "Agent not available"}
         
-        print(f"💰 Storing financial info: {annual_income}, {monthly_spending}")
+        print(f"💰 Storing financial info: income={annual_income}, spending={monthly_spending}")
         
-        # Store in current collected data
-        agent.current_collected_data.update({
-            "annual_income": annual_income,
-            "monthly_spending": monthly_spending
-        })
+        # Store non-empty values in collected data
+        if annual_income:
+            agent.current_collected_data["annual_income"] = annual_income
+        if monthly_spending:
+            agent.current_collected_data["monthly_spending"] = monthly_spending
         
-        print(f"✅ Financial info stored")
-        return {"success": True, "message": "Financial information stored successfully!"}
+        print(f"📈 Updated collected data: {agent.current_collected_data}")
+        
+        # Check what we have collected so far
+        collected_fields = []
+        if agent.current_collected_data.get("annual_income"):
+            collected_fields.append(f"income: {agent.current_collected_data['annual_income']}")
+        if agent.current_collected_data.get("monthly_spending"):
+            collected_fields.append(f"spending: {agent.current_collected_data['monthly_spending']}")
+        
+        return {
+            "success": True,
+            "message": f"Stored financial information: {', '.join(collected_fields)}",
+            "collected_fields": collected_fields
+        }
         
     except Exception as e:
-        print(f"❌ Error in store_financial_info_tool: {str(e)}")
+        print(f"Error in store_financial_info_tool: {str(e)}")
         return {"success": False, "error": str(e)}
 
 @function_tool
 def store_holiday_preferences_tool(holiday_preferences: str) -> dict:
-    """Store user's holiday preferences"""
+    """
+    Store holiday preferences from user input
+    
+    Args:
+        holiday_preferences: User's holiday/travel activity preferences
+        
+    Returns:
+        Dict with success status and stored information
+    """
     try:
         agent = _get_onboarding_agent()
         if not agent:
-            return {"error": "Agent not available"}
+            return {"success": False, "error": "Agent not available"}
         
         print(f"🏖️ Storing holiday preferences: {holiday_preferences}")
         
-        # Store in current collected data
+        # Store holiday preferences in collected data
         agent.current_collected_data["holiday_preferences"] = holiday_preferences
         
-        print(f"✅ Holiday preferences stored")
-        return {"success": True, "message": "Holiday preferences stored successfully!"}
+        print(f"📈 Updated collected data: {agent.current_collected_data}")
         
-    except Exception as e:
-        print(f"❌ Error in store_holiday_preferences_tool: {str(e)}")
-        return {"success": False, "error": str(e)}
-
-@function_tool
-def send_group_invites_tool(email_list: str) -> dict:
-    """Send group invites to a list of email addresses"""
-    try:
-        agent = _get_onboarding_agent()
-        if not agent:
-            return {"error": "Agent not available"}
-        
-        print(f"📧 Sending group invites to: {email_list}")
-        
-        # Parse email list
-        emails = [email.strip() for email in email_list.replace(';', ',').split(',') if email.strip()]
-        
-        if not emails:
-            return {"success": False, "error": "No valid email addresses provided"}
-        
-        # Get user's group code
-        group_code = agent.current_collected_data.get("group_code")
-        if not group_code:
-            return {"success": False, "error": "No group code available"}
-        
-        # Send invites
-        invite_results = []
-        for email in emails:
-            try:
-                result = _run_async_safely(agent.email_service.send_group_invite(email, group_code, agent.current_user_id))
-                invite_results.append(f"{email}: {'Success' if result.get('success') else 'Failed'}")
-            except Exception as e:
-                invite_results.append(f"{email}: Failed ({str(e)})")
-        
-        # Mark group invites as sent
-        agent.current_collected_data["group_invites_sent"] = True
-        agent.current_collected_data["invited_emails"] = emails
-        
-        print(f"✅ Group invites sent: {invite_results}")
         return {
-            "success": True, 
-            "message": f"Group invites sent to {len(emails)} email(s)",
-            "results": invite_results
+            "success": True,
+            "message": f"Stored holiday preferences: {holiday_preferences}",
+            "preferences": holiday_preferences
         }
         
     except Exception as e:
-        print(f"❌ Error in send_group_invites_tool: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error in store_holiday_preferences_tool: {str(e)}")
         return {"success": False, "error": str(e)}
 
 @function_tool
-def decline_group_invites_tool() -> dict:
-    """Decline to send group invites"""
+def send_group_invites_tool(email_addresses: str) -> dict:
+    """
+    Send group invitation emails using the enhanced email service
+    
+    Args:
+        email_addresses: String containing email addresses to send invites to
+        
+    Returns:
+        Dict with success status and details
+    """
     try:
         agent = _get_onboarding_agent()
         if not agent:
-            return {"error": "Agent not available"}
+            return {"success": False, "error": "Agent not available"}
         
-        print(f"❌ User declined to send group invites")
+        group_code = agent.current_collected_data.get("group_code")
+        sender_name = agent.current_collected_data.get("name", "Arny User")
         
-        # Mark group invites as declined
+        if not group_code:
+            return {"success": False, "error": "No group code available"}
+        
+        print(f"📧 Sending group invites to: {email_addresses}")
+        print(f"📋 Group code: {group_code}, Sender: {sender_name}")
+        
+        # Use the enhanced email service to send invites
+        result = _run_async_safely(
+            agent.email_service.send_group_invites(
+                user_id=agent.current_user_id,
+                email_addresses=email_addresses,
+                group_code=group_code,
+                sender_name=sender_name
+            )
+        )
+        
+        print(f"📬 Invite sending result: {result}")
+        
+        if result.get("success"):
+            # Mark invites as sent
+            agent.current_collected_data["group_invites_sent"] = True
+            agent.current_collected_data["invited_emails"] = result.get("sent_to", [])
+        else:
+            # Handle email sending limitation in Lambda
+            agent.current_collected_data["group_invites_sent"] = True
+            agent.current_collected_data["group_code_shared"] = group_code
+        
+        return result
+        
+    except Exception as e:
+        print(f"Error in send_group_invites_tool: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+@function_tool
+def validate_group_code_tool(group_code: str) -> dict:
+    """
+    Validate a group code and check if it exists in the database
+    """
+    try:
+        agent = _get_onboarding_agent()
+        if not agent:
+            return {"valid": False, "error": "Agent not available"}
+        
+        print(f"🔍 Validating group code: {group_code}")
+        
+        # Check if user wants to skip
+        if group_code.lower() in ["skip", "no", "none", "later"]:
+            print("👤 User wants to skip group setup")
+            return {"valid": False, "skip": True, "message": "User wants to skip group setup"}
+        
+        # Validate format
+        formatted_code = agent.group_generator.format_group_code(group_code)
+        is_valid = agent.group_generator.validate_group_code(formatted_code)
+        
+        print(f"📝 Formatted code: {formatted_code}, Valid format: {is_valid}")
+        
+        if not is_valid:
+            return {"valid": False, "exists": False, "message": "Invalid group code format. Group codes should be 4-10 alphanumeric characters. Please check the group code and try again, or type 'skip' to skip group setup for now."}
+        
+        # Check if group exists in database using safe async handling
+        try:
+            print("🔍 Checking if group exists in database...")
+            group_exists = _run_async_safely(agent.db.check_group_exists(formatted_code))
+            print(f"📊 Group exists: {group_exists}")
+        except Exception as db_error:
+            print(f"❌ Database error checking group existence: {str(db_error)}")
+            import traceback
+            traceback.print_exc()
+            return {"valid": False, "error": f"Database error: {str(db_error)}"}
+        
+        if group_exists:
+            # Add user to existing group as member
+            try:
+                print(f"➕ Adding user {agent.current_user_id} to existing group {formatted_code}")
+                success = _run_async_safely(agent.db.add_group_member(formatted_code, agent.current_user_id, "member"))
+                print(f"✅ Successfully added to group: {success}")
+            except Exception as db_error:
+                print(f"❌ Database error joining group: {str(db_error)}")
+                return {"valid": True, "exists": True, "error": f"Failed to join group: {str(db_error)}"}
+            
+            if success:
+                # Store group info
+                agent.current_collected_data["group_code"] = formatted_code
+                agent.current_collected_data["group_role"] = "member"
+                
+                print(f"📈 Updated collected data: {agent.current_collected_data}")
+                
+                return {
+                    "valid": True,
+                    "exists": True,
+                    "group_code": formatted_code,
+                    "message": f"Successfully joined group {formatted_code}"
+                }
+            else:
+                return {
+                    "valid": True,
+                    "exists": True,
+                    "error": f"Failed to join group {formatted_code}. You may already be a member."
+                }
+        else:
+            print(f"❌ Group {formatted_code} does not exist")
+            return {
+                "valid": True,
+                "exists": False,
+                "group_code": formatted_code,
+                "message": f"Group {formatted_code} does not exist. Please check the group code and try again, or type 'skip' to skip group setup for now."
+            }
+            
+    except Exception as e:
+        print(f"❌ Error in validate_group_code_tool: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"valid": False, "error": str(e)}
+
+@function_tool
+def decline_group_invites_tool() -> dict:
+    """
+    Mark that the user declined to send group invites (for admin users)
+    """
+    try:
+        agent = _get_onboarding_agent()
+        if not agent:
+            return {"success": False, "error": "Agent not available"}
+        
+        print("⏭️ User declined to send group invites")
+        
+        # Mark that user declined group invites
         agent.current_collected_data["group_invites_declined"] = True
         
-        print(f"✅ Group invites declined")
-        return {"success": True, "message": "Group invites declined. You can always send invites later from the app."}
+        print(f"📈 Updated collected data: {agent.current_collected_data}")
+        
+        return {
+            "success": True,
+            "message": "Group invites declined. You can always invite people later through the app."
+        }
         
     except Exception as e:
         print(f"❌ Error in decline_group_invites_tool: {str(e)}")
         return {"success": False, "error": str(e)}
 
 @function_tool
-def validate_group_code_tool(group_code: str) -> dict:
-    """Validate if a group code exists and join the group if it does"""
-    try:
-        agent = _get_onboarding_agent()
-        if not agent:
-            return {"error": "Agent not available"}
-        
-        print(f"🔍 Validating group code: {group_code}")
-        
-        # Check if group exists
-        group_exists = _run_async_safely(agent.db.check_group_exists(group_code))
-        
-        if group_exists:
-            print(f"✅ Group code {group_code} exists, joining group")
-            
-            # Join the group as a member
-            join_result = _run_async_safely(agent.db.join_group(agent.current_user_id, group_code))
-            
-            if join_result:
-                agent.current_collected_data["group_code"] = group_code
-                agent.current_collected_data["group_role"] = "member"
-                print(f"✅ Successfully joined group {group_code} as member")
-                return {
-                    "success": True,
-                    "group_exists": True,
-                    "joined": True,
-                    "message": f"Great! You've successfully joined the group with code {group_code}."
-                }
-            else:
-                return {
-                    "success": False,
-                    "group_exists": True,
-                    "joined": False,
-                    "error": "Failed to join the group"
-                }
-        else:
-            print(f"❌ Group code {group_code} does not exist")
-            return {
-                "success": False,
-                "group_exists": False,
-                "joined": False,
-                "message": f"The group code {group_code} doesn't exist. Please check the code and try again, or type 'skip' to skip group setup for now."
-            }
-        
-    except Exception as e:
-        print(f"❌ Error in validate_group_code_tool: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return {"success": False, "error": str(e)}
-
-@function_tool
 def skip_group_setup_tool() -> dict:
-    """Skip group setup and create a personal group for the user"""
+    """
+    Skip group setup - automatically generate a random group code for the user (hidden from user)
+    """
     try:
         agent = _get_onboarding_agent()
         if not agent:
-            return {"error": "Agent not available"}
+            return {"success": False, "error": "Agent not available"}
         
-        print(f"⏭️ Skipping group setup for user {agent.current_user_id}")
+        print("⏭️ Skipping group setup - generating new group code")
         
-        # Generate a unique group code for personal use
-        personal_group_code = agent.group_generator.generate_group_code()
-        
-        # Create a personal group
-        personal_group_created = _run_async_safely(agent.db.create_group(
-            agent.current_user_id, 
-            personal_group_code, 
-            group_name="Personal Group"
-        ))
-        
-        if personal_group_created:
-            agent.current_collected_data["group_code"] = personal_group_code
-            agent.current_collected_data["group_role"] = "admin"
-            agent.current_collected_data["group_setup_skipped"] = True
-            print(f"✅ Personal group created with code: {personal_group_code}")
+        # Check if group setup was already skipped to avoid duplicate processing
+        if agent.current_collected_data.get("group_skipped"):
+            print("⚠️ Group setup already skipped, using existing data")
             return {
                 "success": True,
-                "personal_group_code": personal_group_code,
-                "message": "No problem! I've set up a personal group for you. You can always invite family or friends later."
+                "message": "Group setup skipped. You can always invite family or friends later."
+            }
+        
+        # Generate a unique random group code for this user
+        try:
+            print("🔍 Getting existing group codes...")
+            existing_codes = _run_async_safely(agent.db.get_existing_group_codes())
+            print(f"📊 Found {len(existing_codes)} existing codes")
+        except Exception as db_error:
+            print(f"❌ Database error getting existing codes: {str(db_error)}")
+            return {"success": False, "error": f"Database error getting existing codes: {str(db_error)}"}
+        
+        new_group_code = agent.group_generator.generate_unique_group_code(existing_codes)
+        print(f"🎲 Generated new group code: {new_group_code}")
+        
+        # Create group in database with user as admin
+        try:
+            print(f"➕ Creating new group {new_group_code} with user {agent.current_user_id} as admin")
+            success = _run_async_safely(agent.db.add_group_member(new_group_code, agent.current_user_id, "admin"))
+            print(f"✅ Group creation success: {success}")
+        except Exception as db_error:
+            print(f"❌ Database error creating group: {str(db_error)}")
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "error": f"Database error creating group: {str(db_error)}"}
+        
+        if success:
+            # Store that user skipped group setup but has a group code (hidden from user)
+            agent.current_collected_data["group_code"] = new_group_code
+            agent.current_collected_data["group_role"] = "admin"
+            agent.current_collected_data["group_skipped"] = True
+            
+            print(f"📈 Updated collected data: {agent.current_collected_data}")
+            print(f"🎉 Successfully created group {new_group_code} for user {agent.current_user_id}")
+            
+            # FIXED: Don't mention the specific group code to the user
+            return {
+                "success": True,
+                "message": "Group setup skipped. You can always invite family or friends later."
             }
         else:
             return {
@@ -514,24 +557,35 @@ class OnboardingAgent:
                 "   Ask about the user's Gmail or Outlook address, then use scan_email_for_profile_tool "
                 "to fetch name, gender, birthdate, and city. IMPORTANT: If email scanning fails or returns an error, "
                 "gracefully proceed to manual data collection without making the user feel like something went wrong. "
-                "For example, if scanning fails, say: 'I'll help you fill out your profile manually instead.'\n\n"
-                "3. PERSONAL INFORMATION:\n"
-                "   Collect: Name, Gender, Birthdate (DD/MM/YYYY), Current City. Use store_personal_info_tool.\n\n"
+                "For example, if scanning fails, say: 'I'll help you fill out your profile manually instead.' "
+                "If you successfully extract ANY information (even partial), "
+                "present what was found and ask the user to confirm or provide the missing details. "
+                "For example: 'I found your name is John Smith, but I couldn't find your gender, birthdate, or city. "
+                "Could you please provide these missing details?' Only if NO information is extracted at all should you "
+                "ask for all details manually.\n\n"
+                "3. PERSONAL INFO:\n"
+                "   Collect: name, gender, birthdate, city. When the user provides this information, use store_personal_info_tool to save it. "
+                "Ask for any missing details and confirm when complete.\n\n"
                 "4. JOB DETAILS:\n"
-                "   Collect: Current Employer, Working Schedule, Holiday Frequency. Use store_job_details_tool.\n\n"
-                "5. FINANCIAL INFORMATION:\n"
-                "   Collect: Annual Income Range, Monthly Holiday Spending Budget. Use store_financial_info_tool.\n\n"
+                "   Ask about: employer, working schedule, holiday frequency. When the user provides this information, use store_job_details_tool to save it. "
+                "Prompt for missing items until complete, then confirm.\n\n"
+                "5. FINANCIAL INFO:\n"
+                "   Ask about: annual income range, average monthly spending amount. When the user provides this information, use store_financial_info_tool to save it. "
+                "Prompt until complete, then confirm.\n\n"
                 "6. HOLIDAY PREFERENCES:\n"
-                "   Collect: Preferred holiday types, destinations, activities. Use store_holiday_preferences_tool.\n\n"
-                "7. GROUP INVITES (Admin users only):\n"
-                "   - For admin users, ask if they want to invite others to their group.\n"
-                "   - If yes, use send_group_invites_tool with comma-separated email list.\n"
-                "   - If no, use decline_group_invites_tool.\n\n"
-                "COMPLETION:\n"
-                "Once ALL information is collected (including group invites for admin users), "
-                "congratulate the user and say: 'This completes your onboarding! Welcome to Arny AI. "
-                "You're now ready to start planning amazing trips!'\n\n"
-                "IMPORTANT RULES:\n"
+                "   Ask about: holiday activities the user likes to do. When the user provides this information, use store_holiday_preferences_tool to save it. "
+                "Prompt until complete, then confirm.\n\n"
+                "7. GROUP INVITATIONS (ONLY if user has group_role = 'admin'):\n"
+                "   - If the user joined an existing group (group_role = 'member'), SKIP this step entirely.\n"
+                "   - If the user skipped group setup (group_role = 'admin'), ask: 'Would you like to setup a group with people you know? This can always be done later.' "
+                "If the user says yes, respond with 'Please invite users to your new group by providing their email addresses.' "
+                "When they provide email addresses, respond with 'To confirm, I will be sending invites to {list all provided email addresses}. Are they correct?' "
+                "If they confirm yes, use send_group_invites_tool to send the invitation emails. "
+                "If the user says no to setting up a group or declines to send invites, use decline_group_invites_tool to mark this step as complete. "
+                "If email sending fails, gracefully explain that the group code can be shared manually.\n\n"
+                "Finally, ONLY when all the above onboarding process is completed, respond: "
+                "'Thank you, this completes your onboarding to Arny!'\n\n"
+                "Always be friendly, conversational, and helpful. Keep track of what information you've already collected to avoid asking the same questions twice. "
                 "DO NOT call the same tool multiple times in one response. "
                 "CONTINUE FROM WHERE THE CONVERSATION LEFT OFF - check collected data to see what step to proceed with. "
                 "NEVER reveal specific group codes to users when they skip group setup. "
@@ -551,11 +605,6 @@ class OnboardingAgent:
                 skip_group_setup_tool
             ]
         )
-    
-    @openai_agents_sdk_retry
-    async def _run_agent_with_retry(self, agent, input_data):
-        """Run agent with retry logic applied"""
-        return await Runner.run(agent, input_data)
     
     async def process_message(self, user_id: str, message: str, session_id: str, 
                             current_progress: Dict[str, Any]) -> Dict[str, Any]:
@@ -593,15 +642,15 @@ class OnboardingAgent:
             for msg in conversation_history:
                 context_messages.append(msg)
             
-            # Process with agent using retry wrapper
+            # Process with agent
             if not conversation_history:
                 # First message in conversation
                 print("🚀 Starting new conversation")
-                result = await self._run_agent_with_retry(self.agent, message)
+                result = await Runner.run(self.agent, message)
             else:
                 # Continue conversation with context
                 print(f"🔄 Continuing conversation with {len(context_messages)} previous messages")
-                result = await self._run_agent_with_retry(self.agent, context_messages + [{"role": "user", "content": message}])
+                result = await Runner.run(self.agent, context_messages + [{"role": "user", "content": message}])
             
             # Extract response
             assistant_message = result.final_output
@@ -726,11 +775,6 @@ class OnboardingAgent:
             print(f"❌ Error checking data completeness: {e}")
             return False
     
-    @openai_responses_api_retry
-    def _openai_responses_create_with_retry(self, **kwargs):
-        """OpenAI Responses API call with retry logic"""
-        return self.openai_client.responses.create(**kwargs)
-    
     async def _detect_onboarding_completion_llm(self, message: str) -> bool:
         """LLM-based onboarding completion detection"""
         try:
@@ -750,7 +794,7 @@ Determine if this message indicates that the onboarding process has been complet
 
 Respond with only "YES" if the message clearly indicates onboarding completion, or "NO" if it does not."""
 
-            response = self._openai_responses_create_with_retry(
+            response = self.openai_client.responses.create(
                 model="o4-mini",
                 input=prompt
             )
@@ -768,134 +812,116 @@ Respond with only "YES" if the message clearly indicates onboarding completion, 
                                 is_complete = response_text == "YES"
                                 if is_complete:
                                     print("🎉 LLM detected onboarding completion!")
+                                else:
+                                    print("🔄 LLM determined onboarding is not complete yet")
                                 
                                 return is_complete
             
-            print("❌ Could not extract valid response from LLM")
-            return False
+            # If we can't parse the response, fall back to phrase detection
+            print("⚠️ Could not parse LLM response, using fallback detection")
+            return self._fallback_phrase_detection(message)
             
         except Exception as e:
-            print(f"❌ Error in LLM completion detection: {e}")
-            return False
-    
+            print(f"❌ Error in LLM-based completion detection: {e}")
+            # Fallback to phrase-based detection on error
+            return self._fallback_phrase_detection(message)
+
     def _fallback_phrase_detection(self, message: str) -> bool:
-        """Fallback phrase-based completion detection"""
-        try:
-            completion_phrases = [
-                "this completes your onboarding",
-                "onboarding is complete", 
-                "welcome to arny ai",
-                "you're now ready to start",
-                "onboarding process is finished",
-                "you're all set",
-                "ready to start planning",
-                "onboarding has been completed"
-            ]
-            
-            message_lower = message.lower()
-            for phrase in completion_phrases:
-                if phrase in message_lower:
-                    print(f"✅ Found completion phrase: '{phrase}'")
-                    return True
-            
-            return False
-            
-        except Exception as e:
-            print(f"❌ Error in phrase detection: {e}")
-            return False
-    
+        """Fallback phrase-based detection for onboarding completion"""
+        print("🔄 Using fallback phrase-based detection")
+        
+        message_lower = message.lower()
+
+        # Key phrases that indicate completion
+        completion_phrases = [
+            "this completes your onboarding to arny",
+            "completes your onboarding to arny", 
+            "your onboarding to arny is complete",
+            "onboarding to arny is now complete",
+            "thank you, this completes your onboarding",
+            "that completes your onboarding",
+            "onboarding complete",
+            "welcome to arny"
+        ]
+
+        # Check if any completion phrase is found
+        for phrase in completion_phrases:
+            if phrase in message_lower:
+                print(f"✅ Fallback detection found completion phrase: '{phrase}'")
+                return True
+
+        print("❌ Fallback detection found no completion phrases")
+        return False
+
     def _determine_current_step_from_data(self, collected_data: Dict[str, Any]) -> str:
-        """Determine the current onboarding step based on collected data"""
+        """Determine current step based on collected data for progress summary"""
+        
         if not collected_data.get("group_code"):
-            return "group_setup"
+            return "waiting_for_group_code"
         elif not collected_data.get("email"):
-            return "email_collection"
+            return "waiting_for_email"
         elif not all([collected_data.get("name"), collected_data.get("gender"), 
                      collected_data.get("birthdate"), collected_data.get("city")]):
-            return "personal_info"
+            return "collecting_personal_info"
         elif not all([collected_data.get("employer"), collected_data.get("working_schedule"), 
                      collected_data.get("holiday_frequency")]):
-            return "job_details"
+            return "collecting_job_details"
         elif not all([collected_data.get("annual_income"), collected_data.get("monthly_spending")]):
-            return "financial_info"
+            return "collecting_financial_info"
         elif not collected_data.get("holiday_preferences"):
-            return "holiday_preferences"
-        elif (collected_data.get("group_role") == "admin" and 
-              not collected_data.get("group_invites_sent") and 
-              not collected_data.get("group_invites_declined")):
-            return "group_invites"
+            return "collecting_holiday_preferences"
+        elif collected_data.get("group_role") == "admin" and not collected_data.get("group_invites_sent") and not collected_data.get("group_invites_declined"):
+            return "offering_group_invites"
         else:
-            return "complete"
+            return "ready_to_complete"
     
     def _create_progress_summary(self, collected_data: Dict[str, Any], current_step: str) -> str:
-        """Create a summary of the current progress for the agent"""
-        summary_parts = []
+        """Create a summary of current progress for the agent"""
         
-        # Group setup
+        summary = []
+        summary.append("ALREADY COMPLETED:")
+        
         if collected_data.get("group_code"):
-            role = collected_data.get("group_role", "member")
-            summary_parts.append(f"✅ Group setup complete (Role: {role})")
-        else:
-            summary_parts.append("❌ Group setup pending")
+            summary.append(f"- Group Setup: Completed (Role: {collected_data.get('group_role', 'unknown')})")
         
-        # Email
         if collected_data.get("email"):
-            summary_parts.append(f"✅ Email: {collected_data['email']}")
-        else:
-            summary_parts.append("❌ Email pending")
+            summary.append(f"- Email: {collected_data['email']}")
         
-        # Personal info
-        personal_fields = ["name", "gender", "birthdate", "city"]
-        personal_complete = all(collected_data.get(field) for field in personal_fields)
-        if personal_complete:
-            summary_parts.append("✅ Personal info complete")
-        else:
-            missing = [f for f in personal_fields if not collected_data.get(f)]
-            summary_parts.append(f"❌ Personal info pending: {', '.join(missing)}")
+        personal_info = []
+        for field in ["name", "gender", "birthdate", "city"]:
+            if collected_data.get(field):
+                personal_info.append(f"{field}: {collected_data[field]}")
+        if personal_info:
+            summary.append(f"- Personal Info: {', '.join(personal_info)}")
         
-        # Job details
-        job_fields = ["employer", "working_schedule", "holiday_frequency"]
-        job_complete = all(collected_data.get(field) for field in job_fields)
-        if job_complete:
-            summary_parts.append("✅ Job details complete")
-        else:
-            missing = [f for f in job_fields if not collected_data.get(f)]
-            summary_parts.append(f"❌ Job details pending: {', '.join(missing)}")
+        job_info = []
+        for field in ["employer", "working_schedule", "holiday_frequency"]:
+            if collected_data.get(field):
+                job_info.append(f"{field}: {collected_data[field]}")
+        if job_info:
+            summary.append(f"- Job Details: {', '.join(job_info)}")
         
-        # Financial info
-        financial_fields = ["annual_income", "monthly_spending"]
-        financial_complete = all(collected_data.get(field) for field in financial_fields)
-        if financial_complete:
-            summary_parts.append("✅ Financial info complete")
-        else:
-            missing = [f for f in financial_fields if not collected_data.get(f)]
-            summary_parts.append(f"❌ Financial info pending: {', '.join(missing)}")
+        financial_info = []
+        for field in ["annual_income", "monthly_spending"]:
+            if collected_data.get(field):
+                financial_info.append(f"{field}: {collected_data[field]}")
+        if financial_info:
+            summary.append(f"- Financial Info: {', '.join(financial_info)}")
         
-        # Holiday preferences
         if collected_data.get("holiday_preferences"):
-            summary_parts.append("✅ Holiday preferences complete")
-        else:
-            summary_parts.append("❌ Holiday preferences pending")
+            summary.append(f"- Holiday Preferences: {collected_data['holiday_preferences']}")
         
-        # Group invites (for admin users)
-        if collected_data.get("group_role") == "admin":
-            if collected_data.get("group_invites_sent"):
-                summary_parts.append("✅ Group invites sent")
-            elif collected_data.get("group_invites_declined"):
-                summary_parts.append("✅ Group invites declined")
-            else:
-                summary_parts.append("❌ Group invites pending")
+        summary.append(f"\nCURRENT STEP: {current_step}")
         
-        summary_parts.append(f"\nNEXT STEP: {current_step}")
-        
-        return "\n".join(summary_parts)
+        return "\n".join(summary)
     
     def _determine_current_step(self, collected_data: Dict[str, Any]) -> OnboardingStep:
-        """Determine the current onboarding step enum"""
+        """Determine current onboarding step based on collected data"""
+        
         if not collected_data.get("group_code"):
-            return OnboardingStep.GROUP_SETUP
+            return OnboardingStep.GROUP_CODE
         elif not collected_data.get("email"):
-            return OnboardingStep.EMAIL_COLLECTION
+            return OnboardingStep.EMAIL_SCAN
         elif not all([collected_data.get("name"), collected_data.get("gender"), 
                      collected_data.get("birthdate"), collected_data.get("city")]):
             return OnboardingStep.PERSONAL_INFO
@@ -906,9 +932,5 @@ Respond with only "YES" if the message clearly indicates onboarding completion, 
             return OnboardingStep.FINANCIAL_INFO
         elif not collected_data.get("holiday_preferences"):
             return OnboardingStep.HOLIDAY_PREFERENCES
-        elif (collected_data.get("group_role") == "admin" and 
-              not collected_data.get("group_invites_sent") and 
-              not collected_data.get("group_invites_declined")):
-            return OnboardingStep.GROUP_INVITES
         else:
-            return OnboardingStep.COMPLETE
+            return OnboardingStep.GROUP_SETUP
