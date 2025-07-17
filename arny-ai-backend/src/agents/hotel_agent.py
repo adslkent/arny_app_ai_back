@@ -237,10 +237,10 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
         # For now, use the destination as provided - in production, you might want to resolve city codes
         destination_code = destination.upper()[:3] if len(destination) > 3 else destination.upper()
         print(f"🔧 Using destination code: {destination_code}")
-        
+
         # OPTIMIZATION 4: Search hotels using Amadeus with ENHANCED parameters for larger datasets
         search_results = await hotel_agent.amadeus_service.search_hotels(
-            destination=destination_code,
+            city_code=destination_code,
             check_in_date=check_in_date,
             check_out_date=check_out_date,
             adults=adults,
