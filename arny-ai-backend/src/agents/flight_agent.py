@@ -208,23 +208,17 @@ async def search_flights_tool(origin: str, destination: str, departure_date: str
         print(f"📅 Departure: {departure_date}, Return: {return_date}")
         print(f"👥 Adults: {adults}, Class: {travel_class}")
         
-        # OPTIMIZATION 3: Prepare search parameters
-        search_params = {
-            "originLocationCode": origin_code,
-            "destinationLocationCode": destination_code,
-            "departureDate": departure_date,
-            "adults": adults,
-            "travelClass": travel_class,
-            "nonStop": False,
-            "max": 50  # ENHANCED: Get up to 50 results for better filtering
-        }
-        
-        if return_date:
-            search_params["returnDate"] = return_date
-        
-        # OPTIMIZATION 4: Search flights using Amadeus API with enhanced timeout
+        # FIXED: Use correct parameter names for AmadeusService.search_flights()
         print("🔍 Calling Amadeus Flight Search API...")
-        flights_response = await flight_agent.amadeus_service.search_flights(**search_params)
+        flights_response = await flight_agent.amadeus_service.search_flights(
+            origin=origin_code,
+            destination=destination_code,
+            departure_date=departure_date,
+            return_date=return_date,
+            adults=adults,
+            cabin_class=travel_class,
+            max_results=50  # ENHANCED: Get up to 50 results for better filtering
+        )
         
         if not flights_response.get("success"):
             return {
@@ -233,7 +227,7 @@ async def search_flights_tool(origin: str, destination: str, departure_date: str
                 "message": f"Sorry, I couldn't find flights from {origin} to {destination}. Please try different dates or destinations."
             }
         
-        raw_flights = flights_response.get("data", [])
+        raw_flights = flights_response.get("results", [])
         print(f"✅ Amadeus returned {len(raw_flights)} flights")
         
         if not raw_flights:
@@ -241,28 +235,35 @@ async def search_flights_tool(origin: str, destination: str, departure_date: str
                 "success": True,
                 "results": [],
                 "message": f"No flights found from {origin} to {destination} on {departure_date}. Try different dates?",
-                "search_params": search_params
+                "search_params": {
+                    "origin": origin_code,
+                    "destination": destination_code,
+                    "departure_date": departure_date,
+                    "return_date": return_date,
+                    "adults": adults,
+                    "cabin_class": travel_class
+                }
             }
         
         # OPTIMIZATION 5: Save search to database (non-blocking)
         flight_search = FlightSearch(
-            id=str(uuid.uuid4()),
+            search_id=str(uuid.uuid4()),
             user_id=flight_agent.current_user_id,
             session_id=flight_agent.current_session_id,
-            origin_airport=origin_code,
-            destination_airport=destination_code,
+            origin=origin_code,
+            destination=destination_code,
             departure_date=departure_date,
             return_date=return_date,
-            adults=adults,
-            travel_class=travel_class,
+            passengers=adults,
+            cabin_class=travel_class,
             search_results=raw_flights,
             created_at=datetime.now()
         )
         
         # OPTIMIZATION 6: Save to database without blocking the response
         try:
-            await flight_agent.db.create_flight_search(flight_search)
-            print(f"💾 Saved flight search to database: {flight_search.id}")
+            await flight_agent.db.save_flight_search(flight_search)
+            print(f"💾 Saved flight search to database: {flight_search.search_id}")
         except Exception as e:
             print(f"⚠️ Database save failed (non-critical): {e}")
         
@@ -270,29 +271,43 @@ async def search_flights_tool(origin: str, destination: str, departure_date: str
         print(f"🎯 Applying profile filtering to {len(raw_flights)} flights...")
         
         filtering_result = await flight_agent.profile_agent.filter_flight_results(
-            flights=raw_flights[:50],  # ENHANCED: Process up to 50 flights
-            user_profile=flight_agent.user_profile,
-            max_results=10  # ENHANCED: Return up to 10 filtered results
+            user_id=flight_agent.current_user_id,
+            flight_results=raw_flights[:50],  # ENHANCED: Process up to 50 flights
+            search_params={
+                "origin": origin_code,
+                "destination": destination_code,
+                "departure_date": departure_date,
+                "return_date": return_date,
+                "adults": adults,
+                "cabin_class": travel_class
+            }
         )
         
         print(f"✅ Profile filtering completed: {len(filtering_result['filtered_results'])} results")
         
         # OPTIMIZATION 8: Store results in agent instance for response
         flight_agent.latest_search_results = filtering_result["filtered_results"]
-        flight_agent.latest_search_id = flight_search.id
+        flight_agent.latest_search_id = flight_search.search_id
         flight_agent.latest_filtering_info = {
             "original_count": len(raw_flights),
             "filtered_count": len(filtering_result["filtered_results"]),
-            "group_size": filtering_result.get("group_size", 1),
-            "rationale": filtering_result["rationale"]
+            "filtering_applied": filtering_result.get("filtering_applied", True),
+            "reasoning": filtering_result.get("reasoning", "Profile-based filtering applied")
         }
         
         # OPTIMIZATION 9: Create enhanced result payload
         result_payload = {
             "success": True,
             "results": filtering_result["filtered_results"],
-            "search_id": flight_search.id,
-            "search_params": search_params,
+            "search_id": flight_search.search_id,
+            "search_params": {
+                "origin": origin_code,
+                "destination": destination_code,
+                "departure_date": departure_date,
+                "return_date": return_date,
+                "adults": adults,
+                "cabin_class": travel_class
+            },
             "filtering_info": flight_agent.latest_filtering_info
         }
         
