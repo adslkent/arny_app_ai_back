@@ -5,14 +5,30 @@ import requests
 import email.mime.text
 import email.mime.multipart
 import os
+import logging
 from typing import List, Dict, Any, Optional
 from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 import msal
 from openai import OpenAI
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    retry_if_exception_message,
+    retry_any,
+    retry_if_result,
+    before_sleep_log,
+    retry_if_exception
+)
+from pydantic import BaseModel, ValidationError
 
 from ..utils.config import config
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 def is_lambda_environment() -> bool:
     """Detect if running in AWS Lambda environment"""
@@ -22,8 +38,164 @@ def is_lambda_environment() -> bool:
         os.environ.get('AWS_EXECUTION_ENV') is not None
     )
 
+# ==================== PYDANTIC MODELS FOR VALIDATION ====================
+
+class GooglePersonName(BaseModel):
+    """Pydantic model for Google People API name validation"""
+    displayName: Optional[str] = None
+    familyName: Optional[str] = None
+    givenName: Optional[str] = None
+
+class GooglePersonBirthday(BaseModel):
+    """Pydantic model for Google People API birthday validation"""
+    date: Optional[Dict[str, int]] = None
+
+class GooglePersonGender(BaseModel):
+    """Pydantic model for Google People API gender validation"""
+    value: Optional[str] = None
+
+class GooglePersonAddress(BaseModel):
+    """Pydantic model for Google People API address validation"""
+    value: Optional[str] = None
+    type: Optional[str] = None
+
+class GooglePersonResponse(BaseModel):
+    """Pydantic model for Google People API response validation"""
+    names: Optional[List[GooglePersonName]] = None
+    birthdays: Optional[List[GooglePersonBirthday]] = None
+    genders: Optional[List[GooglePersonGender]] = None
+    addresses: Optional[List[GooglePersonAddress]] = None
+    locations: Optional[List[Dict[str, Any]]] = None
+    residences: Optional[List[Dict[str, Any]]] = None
+
+class MicrosoftUserResponse(BaseModel):
+    """Pydantic model for Microsoft Graph API user response validation"""
+    displayName: Optional[str] = None
+    mail: Optional[str] = None
+    userPrincipalName: Optional[str] = None
+    officeLocation: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None
+    id: Optional[str] = None
+
+class EmailScanResult(BaseModel):
+    """Pydantic model for email scan result validation"""
+    name: Optional[str] = None
+    gender: Optional[str] = None
+    birthdate: Optional[str] = None
+    city: Optional[str] = None
+    success: bool
+    error: Optional[str] = None
+
+# ==================== CUSTOM RETRY CONDITIONS ====================
+
+def retry_on_google_api_error_result(result):
+    """
+    Condition 2: Inspect the payload for "error"/"warning" fields, retrying when they're present
+    """
+    if isinstance(result, dict):
+        return (
+            result.get("success") is False or
+            result.get("error") is not None or
+            "error" in result or
+            "warning" in result or
+            "error" in str(result).lower()
+        )
+    return False
+
+def retry_on_http_status_error(result):
+    """
+    Condition 1: Check success flag equivalent to retry on non-2xx/3xx responses
+    """
+    if isinstance(result, dict):
+        # Check for HTTP status codes in error messages or response data
+        error_msg = str(result.get("error", "")).lower()
+        return any(code in error_msg for code in ['400', '401', '403', '404', '429', '500', '502', '503', '504'])
+    return False
+
+def retry_on_api_validation_failure(result):
+    """
+    Condition 5: Validate against schema/model (Pydantic) and retry when validation fails
+    """
+    if isinstance(result, dict) and result.get("success"):
+        try:
+            # Validate email scan result structure
+            EmailScanResult(**result)
+            return False  # Validation passed
+        except ValidationError as e:
+            logger.warning(f"Email API response validation failed: {e}")
+            return True  # Validation failed, retry
+        except Exception as e:
+            logger.warning(f"Unexpected validation error: {e}")
+            return True
+    return False
+
+def retry_on_google_api_exception(exception):
+    """Custom exception checker for Google API exceptions"""
+    return isinstance(exception, (
+        requests.exceptions.RequestException,
+        ConnectionError,
+        TimeoutError,
+        Exception
+    )) and any(keyword in str(exception).lower() for keyword in [
+        'google', 'oauth', 'api', 'timeout', 'connection', 'network'
+    ])
+
+def retry_on_microsoft_api_exception(exception):
+    """Custom exception checker for Microsoft API exceptions"""
+    return isinstance(exception, (
+        requests.exceptions.RequestException,
+        ConnectionError,
+        TimeoutError,
+        Exception
+    )) and any(keyword in str(exception).lower() for keyword in [
+        'microsoft', 'graph', 'oauth', 'api', 'timeout', 'connection', 'network'
+    ])
+
+# ==================== COMBINED RETRY STRATEGIES ====================
+
+# Retry strategy for Google API operations
+google_api_retry = retry(
+    retry=retry_any(
+        # Condition 3: Exception message matching
+        retry_if_exception_message(match=r".*(timeout|failed|unavailable|network|connection|429|502|503|504|rate.?limit|quota|oauth|google).*"),
+        # Condition 4: Exception types and custom checkers
+        retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
+        retry_if_exception(retry_on_google_api_exception),
+        # Condition 2: Error/warning field inspection
+        retry_if_result(retry_on_google_api_error_result),
+        # Condition 1: HTTP status code checking
+        retry_if_result(retry_on_http_status_error),
+        # Condition 5: Validation failure
+        retry_if_result(retry_on_api_validation_failure)
+    ),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1.5, min=1, max=15),
+    before_sleep=before_sleep_log(logger, logging.WARNING)
+)
+
+# Retry strategy for Microsoft API operations
+microsoft_api_retry = retry(
+    retry=retry_any(
+        # Condition 3: Exception message matching
+        retry_if_exception_message(match=r".*(timeout|failed|unavailable|network|connection|429|502|503|504|rate.?limit|quota|oauth|microsoft|graph).*"),
+        # Condition 4: Exception types and custom checkers
+        retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
+        retry_if_exception(retry_on_microsoft_api_exception),
+        # Condition 2: Error/warning field inspection
+        retry_if_result(retry_on_google_api_error_result),  # Same logic applies
+        # Condition 1: HTTP status code checking
+        retry_if_result(retry_on_http_status_error),
+        # Condition 5: Validation failure
+        retry_if_result(retry_on_api_validation_failure)
+    ),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1.5, min=1, max=15),
+    before_sleep=before_sleep_log(logger, logging.WARNING)
+)
+
 class EmailService:
-    """Enhanced service for email operations with Lambda-compatible OAuth"""
+    """Enhanced service for email operations with Lambda-compatible OAuth and Tenacity retry strategies"""
     
     def __init__(self):
         self.openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
@@ -86,9 +258,10 @@ City:"""
             print(f"❌ City extraction failed for '{address_text}': {str(e)}")
             return None
     
+    @google_api_retry
     def scan_gmail_profile_server_to_server(self, email: str, user_id: str) -> Dict[str, Any]:
         """
-        Server-to-server Gmail profile scanning using service account
+        Server-to-server Gmail profile scanning using service account with Tenacity retry strategies
         NOTE: This requires domain-wide delegation setup for business emails
         """
         try:
@@ -98,7 +271,7 @@ City:"""
             service_account_file = os.environ.get('GOOGLE_SERVICE_ACCOUNT_FILE')
             if not service_account_file or not os.path.exists(service_account_file):
                 print("❌ No Google service account file found")
-                return {
+                result = {
                     "name": None,
                     "gender": None,
                     "birthdate": None,
@@ -106,6 +279,22 @@ City:"""
                     "success": False,
                     "error": "Service account credentials not configured"
                 }
+                
+                # Validate result before returning
+                try:
+                    EmailScanResult(**result)
+                except ValidationError as ve:
+                    logger.warning(f"Gmail scan result validation failed: {ve}")
+                    return {
+                        "name": None,
+                        "gender": None,
+                        "birthdate": None,
+                        "city": None,
+                        "success": False,
+                        "error": f"Response validation failed: {str(ve)}"
+                    }
+                
+                return result
             
             # Load service account credentials
             credentials = service_account.Credentials.from_service_account_file(
@@ -133,6 +322,20 @@ City:"""
             
             print(f"👤 Retrieved Google People API data for {email}")
             
+            # Validate Google API response
+            try:
+                GooglePersonResponse(**person)
+            except ValidationError as ve:
+                logger.warning(f"Google People API response validation failed: {ve}")
+                return {
+                    "name": None,
+                    "gender": None,
+                    "birthdate": None,
+                    "city": None,
+                    "success": False,
+                    "error": f"Google API response validation failed: {str(ve)}"
+                }
+            
             # Extract profile information
             name = person.get("names", [{}])[0].get("displayName")
             gender = person.get("genders", [{}])[0].get("value")
@@ -150,12 +353,26 @@ City:"""
                 "success": True
             }
             
+            # Validate result before returning
+            try:
+                EmailScanResult(**result)
+            except ValidationError as ve:
+                logger.warning(f"Gmail scan result validation failed: {ve}")
+                return {
+                    "name": None,
+                    "gender": None,
+                    "birthdate": None,
+                    "city": None,
+                    "success": False,
+                    "error": f"Result validation failed: {str(ve)}"
+                }
+            
             print(f"✅ Server-to-server Gmail profile extraction result: {result}")
             return result
             
         except Exception as e:
             print(f"❌ Error in server-to-server Gmail scanning: {e}")
-            return {
+            result = {
                 "name": None,
                 "gender": None,
                 "birthdate": None,
@@ -163,10 +380,14 @@ City:"""
                 "success": False,
                 "error": str(e)
             }
+            
+            # Let retry strategy handle this error by returning error result
+            return result
     
+    @microsoft_api_retry
     def scan_outlook_profile_server_to_server(self, email: str, user_id: str) -> Dict[str, Any]:
         """
-        Server-to-server Outlook profile scanning using client credentials
+        Server-to-server Outlook profile scanning using client credentials with Tenacity retry strategies
         NOTE: This works for organizational emails but has limitations for personal emails
         """
         try:
@@ -174,7 +395,7 @@ City:"""
             
             if not config.OUTLOOK_CLIENT_ID or not config.OUTLOOK_CLIENT_SECRET:
                 print("❌ Outlook client credentials not configured")
-                return {
+                result = {
                     "name": None,
                     "gender": None,
                     "birthdate": None,
@@ -182,6 +403,22 @@ City:"""
                     "success": False,
                     "error": "Outlook client credentials not configured"
                 }
+                
+                # Validate result before returning
+                try:
+                    EmailScanResult(**result)
+                except ValidationError as ve:
+                    logger.warning(f"Outlook scan result validation failed: {ve}")
+                    return {
+                        "name": None,
+                        "gender": None,
+                        "birthdate": None,
+                        "city": None,
+                        "success": False,
+                        "error": f"Response validation failed: {str(ve)}"
+                    }
+                
+                return result
             
             # Use client credentials flow for app-only access
             app = msal.ConfidentialClientApplication(
@@ -191,14 +428,14 @@ City:"""
             )
             
             # Get app-only token
-            result = app.acquire_token_for_client(
+            token_result = app.acquire_token_for_client(
                 scopes=["https://graph.microsoft.com/.default"]
             )
             
-            if "access_token" not in result:
-                error_msg = result.get("error_description", result.get("error", "Unknown error"))
+            if "access_token" not in token_result:
+                error_msg = token_result.get("error_description", token_result.get("error", "Unknown error"))
                 print(f"❌ Failed to get app-only token: {error_msg}")
-                return {
+                result = {
                     "name": None,
                     "gender": None,
                     "birthdate": None,
@@ -206,11 +443,14 @@ City:"""
                     "success": False,
                     "error": f"App-only authentication failed: {error_msg}"
                 }
+                
+                # This will trigger retry if it's a retryable error
+                return result
             
             print("✅ Got app-only token for Microsoft Graph")
             
             # Extract profile data using app-only permissions
-            profile_data = self.extract_outlook_profile_data_app_only(result['access_token'], email)
+            profile_data = self.extract_outlook_profile_data_app_only(token_result['access_token'], email)
             
             result_data = {
                 "name": profile_data["name"],
@@ -220,12 +460,26 @@ City:"""
                 "success": True
             }
             
+            # Validate result before returning
+            try:
+                EmailScanResult(**result_data)
+            except ValidationError as ve:
+                logger.warning(f"Outlook scan result validation failed: {ve}")
+                return {
+                    "name": None,
+                    "gender": None,
+                    "birthdate": None,
+                    "city": None,
+                    "success": False,
+                    "error": f"Result validation failed: {str(ve)}"
+                }
+            
             print(f"✅ Server-to-server Outlook profile extraction result: {result_data}")
             return result_data
             
         except Exception as e:
             print(f"❌ Error in server-to-server Outlook scanning: {e}")
-            return {
+            result = {
                 "name": None,
                 "gender": None,
                 "birthdate": None,
@@ -233,9 +487,13 @@ City:"""
                 "success": False,
                 "error": str(e)
             }
+            
+            # Let retry strategy handle this error by returning error result
+            return result
     
+    @microsoft_api_retry
     def extract_outlook_profile_data_app_only(self, access_token: str, email: str) -> Dict[str, Any]:
-        """Extract profile data using app-only Microsoft Graph permissions"""
+        """Extract profile data using app-only Microsoft Graph permissions with Tenacity retry strategies"""
         headers = {"Authorization": f"Bearer {access_token}"}
         
         profile_data = {
@@ -251,12 +509,40 @@ City:"""
             # Try to get user by email (requires User.Read.All permission)
             user_response = requests.get(
                 f"https://graph.microsoft.com/v1.0/users/{email}",
-                headers=headers
+                headers=headers,
+                timeout=10
             )
+            
+            # Condition 1: Check HTTP status code
+            if not user_response.ok:
+                error_msg = f"HTTP {user_response.status_code}: {user_response.text}"
+                print(f"❌ Failed to get user data: {error_msg}")
+                
+                # Return error result to trigger retry on non-2xx status
+                return {
+                    "name": None,
+                    "gender": None,
+                    "birthdate": None,
+                    "city": None,
+                    "error": error_msg
+                }
             
             if user_response.status_code == 200:
                 user_data = user_response.json()
                 print(f"👤 Found user data for {email}")
+                
+                # Validate Microsoft API response
+                try:
+                    MicrosoftUserResponse(**user_data)
+                except ValidationError as ve:
+                    logger.warning(f"Microsoft Graph API response validation failed: {ve}")
+                    return {
+                        "name": None,
+                        "gender": None,
+                        "birthdate": None,
+                        "city": None,
+                        "error": f"Microsoft API response validation failed: {str(ve)}"
+                    }
                 
                 profile_data["name"] = user_data.get("displayName")
                 
@@ -275,10 +561,42 @@ City:"""
                     profile_data["city"] = city_field
                     
             else:
-                print(f"❌ Failed to get user data: {user_response.status_code} - {user_response.text}")
+                error_msg = f"Failed to get user data: {user_response.status_code} - {user_response.text}"
+                print(f"❌ {error_msg}")
                 
+                # Return error to trigger retry
+                return {
+                    "name": None,
+                    "gender": None,
+                    "birthdate": None,
+                    "city": None,
+                    "error": error_msg
+                }
+                
+        except requests.exceptions.RequestException as e:
+            error_msg = f"Request error extracting Outlook profile: {str(e)}"
+            print(f"❌ {error_msg}")
+            
+            # Return error to trigger retry
+            return {
+                "name": None,
+                "gender": None,
+                "birthdate": None,
+                "city": None,
+                "error": error_msg
+            }
         except Exception as e:
-            print(f"❌ Error extracting Outlook profile: {str(e)}")
+            error_msg = f"Error extracting Outlook profile: {str(e)}"
+            print(f"❌ {error_msg}")
+            
+            # Return error to trigger retry
+            return {
+                "name": None,
+                "gender": None,
+                "birthdate": None,
+                "city": None,
+                "error": error_msg
+            }
         
         print(f"✅ Final Outlook profile data: {profile_data}")
         return profile_data
