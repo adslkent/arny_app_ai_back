@@ -1,8 +1,11 @@
 """
-Database operations for Arny AI - ENHANCED VERSION WITH TENACITY RETRY STRATEGIES
+Database operations for Arny AI - ENHANCED VERSION WITH GROUP INVITE COMPLETION FIX
 
-Enhanced with comprehensive retry strategies for all Supabase database operations
-using Tenacity library for robust error handling and automatic retries.
+ENHANCED Issues Fixed:
+1. Enhanced filtering for group invite fields during onboarding completion
+2. Improved error handling to prevent profile corruption during group invite completion
+3. Additional verification steps for group invite completion scenarios
+4. Better logging for debugging group invite onboarding issues
 """
 
 from typing import Optional, Dict, Any, List, Union, Tuple
@@ -13,17 +16,6 @@ import logging
 import asyncio
 from supabase import create_client, Client
 from postgrest.exceptions import APIError
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-    retry_if_exception_message,
-    retry_any,
-    retry_if_result,
-    before_sleep_log
-)
-from pydantic import BaseModel, ValidationError
 
 from ..utils.config import config
 from .models import (
@@ -36,64 +28,9 @@ from .models import (
 # Set up logging
 logger = logging.getLogger(__name__)
 
-# Custom retry conditions for database operations
-def retry_on_db_error(result):
-    """Retry if database operation result contains errors or warnings"""
-    if hasattr(result, 'data') and hasattr(result, 'error'):
-        # Supabase response object
-        return result.error is not None
-    elif isinstance(result, dict):
-        return (
-            result.get("error") is not None or
-            "warning" in result or
-            result.get("success") is False
-        )
-    return False
-
-def retry_on_empty_required_result(result):
-    """Retry if result is unexpectedly empty for operations that should return data"""
-    if hasattr(result, 'data'):
-        return result.data is None or (isinstance(result.data, list) and len(result.data) == 0)
-    return False
-
-def retry_on_validation_error(result):
-    """Retry if result fails Pydantic model validation"""
-    if hasattr(result, 'data') and result.data:
-        try:
-            # This will be customized per method based on expected model
-            return False
-        except ValidationError:
-            return True
-    return False
-
-# Combined retry strategy for database operations
-database_retry = retry(
-    retry=retry_any(
-        retry_if_exception_type((APIError, ConnectionError, TimeoutError)),
-        retry_if_exception_message(match=r".*(timeout|failed|unavailable|network|connection|502|503|504).*"),
-        retry_if_result(retry_on_db_error)
-    ),
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    before_sleep=before_sleep_log(logger, logging.WARNING)
-)
-
-# Specific retry for operations that should return data
-database_retry_with_data = retry(
-    retry=retry_any(
-        retry_if_exception_type((APIError, ConnectionError, TimeoutError)),
-        retry_if_exception_message(match=r".*(timeout|failed|unavailable|network|connection|502|503|504).*"),
-        retry_if_result(retry_on_db_error),
-        retry_if_result(retry_on_empty_required_result)
-    ),
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    before_sleep=before_sleep_log(logger, logging.WARNING)
-)
-
 class DatabaseOperations:
     """
-    Database operations using Supabase with comprehensive retry strategies
+    Database operations using Supabase - ENHANCED VERSION WITH GROUP INVITE COMPLETION FIX
     """
     
     def __init__(self):
@@ -143,10 +80,9 @@ class DatabaseOperations:
     
     # ==================== USER PROFILE OPERATIONS ====================
     
-    @database_retry
     async def get_user_profile(self, user_id: str) -> Optional[UserProfile]:
         """
-        Get user profile by user_id with retry strategies
+        Get user profile by user_id - ENHANCED VERSION
         """
         try:
             # Use consistent UUID validation
@@ -162,13 +98,7 @@ class DatabaseOperations:
             if response.data and len(response.data) > 0:
                 profile_data = response.data[0]
                 logger.info(f"User profile found for user_id: {validated_user_id}")
-                
-                # Validate with Pydantic model
-                try:
-                    return UserProfile(**profile_data)
-                except ValidationError as ve:
-                    logger.error(f"Profile validation error for user {validated_user_id}: {ve}")
-                    return None
+                return UserProfile(**profile_data)
             
             logger.info(f"No user profile found for user_id: {validated_user_id}")
             return None
@@ -177,10 +107,9 @@ class DatabaseOperations:
             logger.error(f"Error getting user profile for {user_id}: {e}")
             return None
     
-    @database_retry
     async def create_user_profile(self, profile: UserProfile) -> bool:
         """
-        Create a new user profile with retry strategies
+        Create a new user profile - ENHANCED VERSION WITH BETTER ERROR HANDLING
         """
         try:
             # Validate the user_id in the profile
@@ -191,7 +120,7 @@ class DatabaseOperations:
             
             logger.info(f"Creating user profile for user_id: {validated_user_id}")
             
-            # Check if profile already exists before creating
+            # FIXED: Check if profile already exists before creating
             existing_profile = await self.get_user_profile(validated_user_id)
             if existing_profile:
                 logger.info(f"User profile already exists for user_id: {validated_user_id}")
@@ -227,10 +156,9 @@ class DatabaseOperations:
             logger.error(f"Error creating user profile for {profile.user_id}: {e}")
             return False
     
-    @database_retry
     async def update_user_profile(self, user_id: str, updates: Dict[str, Any]) -> bool:
         """
-        Update user profile with enhanced safety, error handling, and retry strategies
+        Update user profile with enhanced safety and error handling
         """
         try:
             # Use consistent UUID validation
@@ -395,10 +323,9 @@ class DatabaseOperations:
         
         return None
     
-    @database_retry
     async def delete_user_profile(self, user_id: str) -> bool:
         """
-        Delete user profile (soft delete by setting is_active to False) with retry strategies
+        Delete user profile (soft delete by setting is_active to False) - ENHANCED VERSION
         """
         try:
             logger.info(f"Soft deleting user profile for user_id: {user_id}")
@@ -414,10 +341,9 @@ class DatabaseOperations:
             logger.error(f"Error deleting user profile for {user_id}: {e}")
             return False
     
-    @database_retry
     async def complete_onboarding(self, user_id: str, profile_data: Dict[str, Any]) -> bool:
         """
-        Mark onboarding as complete with enhanced filtering and retry strategies
+        ENHANCED: Mark onboarding as complete with ENHANCED filtering for group invite fields
         """
         try:
             # Use consistent UUID validation
@@ -441,28 +367,32 @@ class DatabaseOperations:
             
             print(f"✅ CRITICAL SUCCESS: Onboarding completion flag set successfully")
             
-            # STEP 2: OPTIONAL - Update profile data with enhanced filtering
+            # STEP 2: OPTIONAL - Update profile data with ENHANCED filtering for group invite fields
             try:
                 print(f"📝 OPTIONAL STEP: Updating profile data with enhanced filtering")
                 
-                # Enhanced filtering for profile data
+                # ENHANCED: Filter out fields that don't belong in user_profiles table, including problematic group invite fields
                 user_profile_fields = {
                     'name', 'gender', 'birthdate', 'city', 'employer',
                     'working_schedule', 'holiday_frequency', 'annual_income',
                     'monthly_spending', 'holiday_preferences', 'travel_style',
-                    'group_code', 'email', 'group_skipped'
+                    'group_code', 'email', 'group_skipped'  # group_skipped is legitimate user preference
                 }
                 
-                # Enhanced: Explicitly exclude problematic fields
+                # ENHANCED: Explicitly exclude only problematic fields that cause database issues
+                # NOTE: group_skipped is a legitimate user preference and should be preserved
                 group_invite_exclude_fields = {
                     'group_invites_sent', 'group_invites_declined', 'group_code_shared',
                     'invited_emails', 'conversation_history', 'current_step',
                     'completion_timestamp', 'completed'
                 }
                 
-                # Better filtering and data cleaning
+                # Allow group_role and group_skipped as they are legitimate profile data
+
+                # Better filtering and data cleaning with enhanced exclusion
                 filtered_profile_data = {}
                 for key, value in profile_data.items():
+                    # Only include fields that belong in user_profiles and exclude problematic group invite fields
                     if (key in user_profile_fields and 
                         key not in group_invite_exclude_fields and 
                         value is not None and value != ""):
@@ -496,7 +426,7 @@ class DatabaseOperations:
             
             # STEP 3: Update onboarding progress to completed
             try:
-                # Include completion status for both group invite and skip cases
+                # ENHANCED: Include completion status for both group invite and skip cases
                 progress_completion_data = {
                     "completed": True, 
                     "completion_timestamp": datetime.utcnow().isoformat(),
@@ -515,25 +445,26 @@ class DatabaseOperations:
                 print(f"⚠️ Progress update failed: {progress_error}")
                 # Don't fail the entire process if progress update fails
             
-            # STEP 4: Enhanced final verification with multiple attempts
+            # STEP 4: ENHANCED FINAL VERIFICATION with multiple attempts
             print(f"🔍 ENHANCED FINAL VERIFICATION: Checking onboarding completion status")
-            verification_attempts = 5
+            verification_attempts = 5  # Increased attempts for group invite case
             
             for attempt in range(verification_attempts):
                 try:
-                    await asyncio.sleep(0.3 * (attempt + 1))
+                    await asyncio.sleep(0.3 * (attempt + 1))  # Progressive delay for database consistency
                     verification_profile = await self.get_user_profile(validated_user_id)
                     
                     if verification_profile and verification_profile.onboarding_completed:
                         print(f"✅ ENHANCED VERIFICATION PASSED: Onboarding completion confirmed!")
                         logger.info(f"Onboarding completed successfully for user_id: {validated_user_id}")
                         
-                        # Additional verification
+                        # ADDITIONAL: Verify the profile has all expected data
                         if verification_profile.email and verification_profile.name:
                             print(f"✅ Profile data verification: email={verification_profile.email}, name={verification_profile.name}")
                             return True
                         else:
                             print(f"⚠️ Profile missing critical data: email={verification_profile.email}, name={verification_profile.name}")
+                            # Continue to next attempt
                     else:
                         print(f"⚠️ Verification attempt {attempt + 1}: onboarding_completed = {verification_profile.onboarding_completed if verification_profile else 'No profile'}")
                         
@@ -567,9 +498,8 @@ class DatabaseOperations:
             traceback.print_exc()
             return False
     
-    @database_retry
     async def _force_onboarding_completion(self, user_id: str) -> bool:
-        """Force onboarding completion with enhanced reliability and retry strategies"""
+        """IMPROVED: Force onboarding completion with enhanced reliability"""
         try:
             # Validate user_id first
             is_valid, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
@@ -588,7 +518,7 @@ class DatabaseOperations:
             
             print(f"📋 Existing profile found: email={existing_profile.email}")
             
-            # Multiple force completion attempts with different strategies
+            # ENHANCED: Multiple force completion attempts with different strategies
             
             # Strategy 1: Direct update with minimal data
             try:
@@ -661,12 +591,11 @@ class DatabaseOperations:
             traceback.print_exc()
             return False
     
-    # ==================== ONBOARDING OPERATIONS ====================
+    # ==================== ONBOARDING OPERATIONS - ENHANCED ====================
     
-    @database_retry
     async def get_onboarding_progress(self, user_id: str) -> Optional[OnboardingProgress]:
         """
-        Get onboarding progress for user with retry strategies and better JSON handling
+        Get onboarding progress for user - ENHANCED VERSION with better JSON handling
         """
         try:
             # Use consistent UUID validation
@@ -682,7 +611,7 @@ class DatabaseOperations:
             if response.data and len(response.data) > 0:
                 progress_data = response.data[0]
                 
-                # Better handling of collected_data JSON parsing
+                # ENHANCED: Better handling of collected_data JSON parsing
                 collected_data = progress_data.get("collected_data")
                 if collected_data:
                     if isinstance(collected_data, str):
@@ -702,13 +631,7 @@ class DatabaseOperations:
                     progress_data["collected_data"] = {}
                 
                 logger.info(f"Onboarding progress found for user_id: {validated_user_id}")
-                
-                # Validate with Pydantic model
-                try:
-                    return OnboardingProgress(**progress_data)
-                except ValidationError as ve:
-                    logger.error(f"Onboarding progress validation error for user {validated_user_id}: {ve}")
-                    return None
+                return OnboardingProgress(**progress_data)
             
             logger.info(f"No onboarding progress found for user_id: {validated_user_id}")
             return None
@@ -717,10 +640,9 @@ class DatabaseOperations:
             logger.error(f"Error getting onboarding progress for {user_id}: {e}")
             return None
     
-    @database_retry
     async def update_onboarding_progress(self, user_id: str, step: OnboardingStep, data: Dict[str, Any]) -> bool:
         """
-        Update onboarding progress with retry strategies and better JSON handling
+        Update onboarding progress - ENHANCED VERSION with better JSON handling
         """
         try:
             # Use consistent UUID validation
@@ -731,7 +653,7 @@ class DatabaseOperations:
             
             logger.info(f"Updating onboarding progress for user_id: {validated_user_id}, step: {step.value}")
             
-            # Ensure data is properly formatted for JSON storage
+            # ENHANCED: Ensure data is properly formatted for JSON storage
             collected_data_json = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
             
             progress_data = {
@@ -761,37 +683,29 @@ class DatabaseOperations:
             logger.error(f"Error updating onboarding progress for {user_id}: {e}")
             return False
     
-    # ==================== GROUP OPERATIONS ====================
+    # ==================== GROUP OPERATIONS - ENHANCED ====================
     
-    @database_retry
     async def get_group_members(self, group_code: str) -> List[GroupMember]:
         """
-        Get all members of a group with retry strategies
+        Get all members of a group
         """
         try:
             logger.info(f"Getting group members for group_code: {group_code}")
             
             response = self.client.table("group_members").select("*").eq("group_code", group_code).eq("is_active", True).execute()
             
-            members = []
-            for member_data in response.data:
-                try:
-                    members.append(GroupMember(**member_data))
-                except ValidationError as ve:
-                    logger.error(f"Group member validation error for group {group_code}: {ve}")
-                    continue
-                    
+            members = [GroupMember(**member) for member in response.data]
             logger.info(f"Found {len(members)} members for group_code: {group_code}")
+            
             return members
             
         except Exception as e:
             logger.error(f"Error getting group members for {group_code}: {e}")
             return []
     
-    @database_retry
     async def add_group_member(self, group_code: str, user_id: str, role: str = "member") -> bool:
         """
-        Add user to a group with retry strategies
+        Add user to a group - ENHANCED VERSION
         """
         try:
             # Use consistent UUID validation
@@ -831,10 +745,9 @@ class DatabaseOperations:
                 return True  # Consider it successful if already a member
             return False
     
-    @database_retry
     async def remove_group_member(self, group_code: str, user_id: str) -> bool:
         """
-        Remove user from a group (soft delete) with retry strategies
+        Remove user from a group (soft delete) - ENHANCED VERSION
         """
         try:
             # Use consistent UUID validation
@@ -862,10 +775,9 @@ class DatabaseOperations:
             logger.error(f"Error removing group member {user_id} from {group_code}: {e}")
             return False
     
-    @database_retry
     async def check_group_exists(self, group_code: str) -> bool:
         """
-        Check if group code exists with retry strategies
+        Check if group code exists
         """
         try:
             logger.info(f"Checking if group exists: {group_code}")
@@ -881,10 +793,9 @@ class DatabaseOperations:
             logger.error(f"Error checking group existence for {group_code}: {e}")
             return False
     
-    @database_retry
     async def get_existing_group_codes(self) -> set:
         """
-        Get all existing group codes with retry strategies
+        Get all existing group codes
         """
         try:
             logger.info("Getting all existing group codes")
@@ -900,10 +811,9 @@ class DatabaseOperations:
             logger.error(f"Error getting existing group codes: {e}")
             return set()
     
-    @database_retry
     async def get_user_groups(self, user_id: str) -> List[str]:
         """
-        Get all groups a user belongs to with retry strategies
+        Get all groups a user belongs to - ENHANCED VERSION
         """
         try:
             # Use consistent UUID validation
@@ -925,12 +835,11 @@ class DatabaseOperations:
             logger.error(f"Error getting user groups for {user_id}: {e}")
             return []
     
-    # ==================== USER STATUS CHECK ====================
+    # ==================== USER STATUS CHECK - ENHANCED ====================
     
-    @database_retry
     async def get_user_status(self, user_id: str) -> Optional[Dict[str, Any]]:
         """
-        Get user status including onboarding completion with retry strategies
+        Get user status including onboarding completion - ENHANCED VERSION
         """
         try:
             # Use consistent UUID validation
@@ -970,15 +879,14 @@ class DatabaseOperations:
             logger.error(f"Error getting user status for {user_id}: {e}")
             return None
     
-    # ==================== CHAT OPERATIONS ====================
+    # ==================== CHAT OPERATIONS - ENHANCED ====================
     
-    @database_retry
     async def save_chat_message(self, message: ChatMessage) -> bool:
         """
-        Save a chat message with retry strategies and better validation
+        Save a chat message - ENHANCED VERSION with better validation
         """
         try:
-            # Enhanced validation before saving
+            # ENHANCED: Validate required fields before saving
             if not message.user_id:
                 logger.error("Cannot save chat message: user_id is missing")
                 return False
@@ -1018,13 +926,12 @@ class DatabaseOperations:
             logger.error(f"Error saving chat message for {message.user_id}: {e}")
             return False
     
-    @database_retry
     async def get_conversation_history(self, user_id: str, session_id: str, limit: int = 50) -> List[ChatMessage]:
         """
-        Get conversation history for a session with retry strategies and better error handling
+        Get conversation history for a session - ENHANCED VERSION with better error handling
         """
         try:
-            # Better UUID validation with specific field names
+            # ENHANCED: Better UUID validation with specific field names
             is_valid_user, validated_user_id = self._validate_and_format_uuid(user_id, "user_id")
             is_valid_session, validated_session_id = self._validate_and_format_uuid(session_id, "session_id")
             
@@ -1055,11 +962,7 @@ class DatabaseOperations:
                     except json.JSONDecodeError:
                         msg_data["metadata"] = {}
                 
-                try:
-                    messages.append(ChatMessage(**msg_data))
-                except ValidationError as ve:
-                    logger.error(f"Chat message validation error: {ve}")
-                    continue
+                messages.append(ChatMessage(**msg_data))
             
             logger.info(f"Retrieved {len(messages)} messages for session: {validated_session_id}")
             return messages
@@ -1068,14 +971,13 @@ class DatabaseOperations:
             logger.error(f"Error getting conversation history for {user_id}: {e}")
             return []
     
-    @database_retry
     async def save_conversation_turn(self, user_id: str, session_id: str, user_message: str, 
                                    assistant_response: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """
-        Save a complete conversation turn (user message + assistant response) with retry strategies
+        Save a complete conversation turn (user message + assistant response) - ENHANCED VERSION
         """
         try:
-            # Enhanced validation before creating ChatMessage objects
+            # ENHANCED: Validate inputs before creating ChatMessage objects
             if not user_id or not session_id:
                 logger.error(f"Cannot save conversation: user_id or session_id is missing")
                 return False
@@ -1128,10 +1030,9 @@ class DatabaseOperations:
     
     # ==================== SEARCH OPERATIONS ====================
     
-    @database_retry
     async def save_flight_search(self, search: FlightSearch) -> bool:
         """
-        Save flight search results with retry strategies
+        Save flight search results
         """
         try:
             logger.info(f"Saving flight search for user: {search.user_id}")
@@ -1160,10 +1061,9 @@ class DatabaseOperations:
             logger.error(f"Error saving flight search for {search.user_id}: {e}")
             return False
     
-    @database_retry
     async def save_hotel_search(self, search: HotelSearch) -> bool:
         """
-        Save hotel search results with retry strategies
+        Save hotel search results
         """
         try:
             logger.info(f"Saving hotel search for user: {search.user_id}")
@@ -1194,10 +1094,9 @@ class DatabaseOperations:
     
     # ==================== USER PREFERENCES OPERATIONS ====================
     
-    @database_retry
     async def get_user_preferences(self, user_id: str) -> Optional[UserPreferences]:
         """
-        Get user preferences with retry strategies
+        Get user preferences - ENHANCED VERSION
         """
         try:
             # Use consistent UUID validation
@@ -1227,11 +1126,7 @@ class DatabaseOperations:
                     except json.JSONDecodeError:
                         prefs_data["budget_range"] = {}
                 
-                try:
-                    return UserPreferences(**prefs_data)
-                except ValidationError as ve:
-                    logger.error(f"User preferences validation error for user {validated_user_id}: {ve}")
-                    return None
+                return UserPreferences(**prefs_data)
             
             return None
             
@@ -1239,10 +1134,9 @@ class DatabaseOperations:
             logger.error(f"Error getting user preferences for {user_id}: {e}")
             return None
     
-    @database_retry
     async def save_user_preferences(self, preferences: UserPreferences) -> bool:
         """
-        Save or update user preferences with retry strategies
+        Save or update user preferences
         """
         try:
             logger.info(f"Saving user preferences for user: {preferences.user_id}")
@@ -1278,10 +1172,9 @@ class DatabaseOperations:
     
     # ==================== DATABASE HEALTH AND MAINTENANCE ====================
     
-    @database_retry
     async def health_check(self) -> Dict[str, Any]:
         """
-        Perform a health check on the database connection with retry strategies
+        Perform a health check on the database connection
         """
         try:
             logger.info("Performing database health check")
