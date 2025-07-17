@@ -10,6 +10,7 @@ to handle larger result sets efficiently. Features:
 - NO TIMEOUT LIMITS on AI processing
 - NO LIMITS on group member processing
 - Cache results to prevent duplicate processing
+- ALWAYS APPLY AI FILTERING for both single travelers and groups
 """
 
 import json
@@ -107,6 +108,7 @@ openai_api_retry = retry(
 class UserProfileAgent:
     """
     ENHANCED: User Profile Agent with support for larger result sets - NO TIMEOUTS OR MEMBER LIMITS
+    ALWAYS APPLIES AI FILTERING for both single travelers and groups
     """
     
     def __init__(self):
@@ -118,7 +120,7 @@ class UserProfileAgent:
             # Initialize result cache for instant responses
             self._filter_cache = {}
             
-            logger.info("UserProfileAgent initialized with enhanced support for larger datasets - NO TIMEOUTS OR MEMBER LIMITS")
+            logger.info("UserProfileAgent initialized with enhanced support for larger datasets - ALWAYS APPLIES AI FILTERING")
         except Exception as e:
             logger.error(f"Failed to initialize UserProfileAgent: {e}")
             raise Exception(f"UserProfileAgent initialization failed: {e}")
@@ -126,12 +128,12 @@ class UserProfileAgent:
     async def filter_flight_results(self, user_id: str, flight_results: List[Dict[str, Any]], 
                                   search_params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        ENHANCED: Filter flight results with support for up to 50 flights, returning up to 10 - NO TIMEOUTS OR MEMBER LIMITS
+        ENHANCED: Filter flight results with support for up to 50 flights, returning up to 10 - ALWAYS APPLIES AI FILTERING
         """
         try:
-            logger.info(f"ENHANCED flight filtering for user {user_id} - NO TIMEOUTS OR MEMBER LIMITS")
+            logger.info(f"ENHANCED flight filtering for user {user_id} - ALWAYS APPLIES AI FILTERING")
             
-            print(f"🚀 ENHANCED: Processing {len(flight_results)} flight results - NO TIMEOUTS OR MEMBER LIMITS")
+            print(f"🚀 ENHANCED: Processing {len(flight_results)} flight results - ALWAYS APPLIES AI FILTERING")
 
             # OPTIMIZATION 1: Check cache first
             cache_key = f"flight_{user_id}_{len(flight_results)}"
@@ -158,20 +160,10 @@ class UserProfileAgent:
                 self._filter_cache[cache_key] = result
                 return result
 
-            # OPTIMIZATION 4: Handle single member (no filtering needed)
-            if len(group_profiles) <= 1:
-                # Return top 10 flights without AI filtering
-                top_flights = flight_results[:10]
-                result = {
-                    "filtered_results": top_flights,
-                    "total_results": len(flight_results),
-                    "filtering_applied": False,
-                    "reasoning": "Single traveler - showing best available options"
-                }
-                self._filter_cache[cache_key] = result
-                return result
+            # REMOVED: Single traveler bypass condition - ALWAYS APPLY AI FILTERING NOW
+            # OLD CODE WAS: if len(group_profiles) <= 1: return top_flights without filtering
 
-            # OPTIMIZATION 5: Enhanced data preparation for larger groups
+            # OPTIMIZATION 4: Enhanced data preparation for all users (single and groups)
             enhanced_flights = self._extract_enhanced_flight_data(flight_results)
             
             if not enhanced_flights:
@@ -184,14 +176,14 @@ class UserProfileAgent:
                 self._filter_cache[cache_key] = result
                 return result
 
-            # OPTIMIZATION 6: Create concise group summary
-            group_summary = self._create_group_summary(group_profiles)
+            # OPTIMIZATION 5: Create profile summary (works for both single travelers and groups)
+            profile_summary = self._create_profile_summary(group_profiles)
             
-            print(f"🧠 Starting AI filtering for {len(enhanced_flights)} flights with group: {group_summary}")
+            print(f"🧠 Starting AI filtering for {len(enhanced_flights)} flights with profile: {profile_summary}")
 
-            # OPTIMIZATION 7: Ultra-efficient AI filtering with NO TIMEOUT LIMITS
+            # OPTIMIZATION 6: AI filtering applied for ALL users with NO TIMEOUT LIMITS
             filtered_result = await self._filter_flights_with_ai_enhanced(
-                enhanced_flights, group_summary, len(group_profiles), flight_results
+                enhanced_flights, profile_summary, len(group_profiles) or 1, flight_results
             )
             
             # Cache and return result
@@ -217,12 +209,12 @@ class UserProfileAgent:
     async def filter_hotel_results(self, user_id: str, hotel_results: List[Dict[str, Any]], 
                                  search_params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        ENHANCED: Filter hotel results with support for up to 50 hotels, returning up to 10 - NO TIMEOUTS OR MEMBER LIMITS
+        ENHANCED: Filter hotel results with support for up to 50 hotels, returning up to 10 - ALWAYS APPLIES AI FILTERING
         """
         try:
-            logger.info(f"ENHANCED hotel filtering for user {user_id} - NO TIMEOUTS OR MEMBER LIMITS")
+            logger.info(f"ENHANCED hotel filtering for user {user_id} - ALWAYS APPLIES AI FILTERING")
             
-            print(f"🚀 ENHANCED: Processing {len(hotel_results)} hotel results - NO TIMEOUTS OR MEMBER LIMITS")
+            print(f"🚀 ENHANCED: Processing {len(hotel_results)} hotel results - ALWAYS APPLIES AI FILTERING")
 
             # OPTIMIZATION 1: Check cache first
             cache_key = f"hotel_{user_id}_{len(hotel_results)}"
@@ -249,20 +241,10 @@ class UserProfileAgent:
                 self._filter_cache[cache_key] = result
                 return result
 
-            # OPTIMIZATION 4: Handle single member (no filtering needed)
-            if len(group_profiles) <= 1:
-                # Return top 10 hotels without AI filtering
-                top_hotels = hotel_results[:10]
-                result = {
-                    "filtered_results": top_hotels,
-                    "total_results": len(hotel_results),
-                    "filtering_applied": False,
-                    "reasoning": "Single traveler - showing best available options"
-                }
-                self._filter_cache[cache_key] = result
-                return result
+            # REMOVED: Single traveler bypass condition - ALWAYS APPLY AI FILTERING NOW
+            # OLD CODE WAS: if len(group_profiles) <= 1: return top_hotels without filtering
 
-            # OPTIMIZATION 5: Enhanced data preparation for larger groups
+            # OPTIMIZATION 4: Enhanced data preparation for all users (single and groups)
             enhanced_hotels = self._extract_enhanced_hotel_data(hotel_results)
             
             if not enhanced_hotels:
@@ -275,14 +257,14 @@ class UserProfileAgent:
                 self._filter_cache[cache_key] = result
                 return result
 
-            # OPTIMIZATION 6: Create concise group summary
-            group_summary = self._create_group_summary(group_profiles)
+            # OPTIMIZATION 5: Create profile summary (works for both single travelers and groups)
+            profile_summary = self._create_profile_summary(group_profiles)
             
-            print(f"🧠 Starting AI filtering for {len(enhanced_hotels)} hotels with group: {group_summary}")
+            print(f"🧠 Starting AI filtering for {len(enhanced_hotels)} hotels with profile: {profile_summary}")
 
-            # OPTIMIZATION 7: Ultra-efficient AI filtering with NO TIMEOUT LIMITS
+            # OPTIMIZATION 6: AI filtering applied for ALL users with NO TIMEOUT LIMITS
             filtered_result = await self._filter_hotels_with_ai_enhanced(
-                enhanced_hotels, group_summary, len(group_profiles), hotel_results
+                enhanced_hotels, profile_summary, len(group_profiles) or 1, hotel_results
             )
             
             # Cache and return result
@@ -312,6 +294,12 @@ class UserProfileAgent:
             user_groups = await self.db.get_user_groups(user_id)
             
             if not user_groups:
+                # If no groups, get individual user profile
+                user_profile = await self.db.get_user_profile(user_id)
+                if user_profile:
+                    profile_dict = user_profile.dict()
+                    profile_dict["group_role"] = "individual"
+                    return [profile_dict]
                 return []
             
             # Use first group only
@@ -415,19 +403,19 @@ class UserProfileAgent:
 
     @openai_api_retry
     async def _filter_flights_with_ai_enhanced(self, enhanced_flights: List[Dict[str, Any]], 
-                                             group_summary: str, group_size: int, 
+                                             profile_summary: str, profile_count: int, 
                                              original_flights: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """ENHANCED: Use AI to filter flights optimized for larger groups - NO TIMEOUT LIMITS with Tenacity retry strategies"""
+        """ENHANCED: Use AI to filter flights optimized for all users - NO TIMEOUT LIMITS with Tenacity retry strategies"""
         
         try:
-            print(f"🧠 AI filtering {len(enhanced_flights)} flights for group: {group_summary}")
+            print(f"🧠 AI filtering {len(enhanced_flights)} flights for profile: {profile_summary}")
             
-            # Ultra-short prompt for efficiency
-            prompt = f"""Filter flights for group: {group_summary}
+            # Ultra-short prompt for efficiency - works for both individuals and groups
+            prompt = f"""Filter flights for traveler profile: {profile_summary}
 
-Group details: {group_summary}
+Profile details: {profile_summary}
 
-Return top 10 flights as JSON: {{"recommended_flights": [{{"id": 1}}, {{"id": 2}}, ...], "filtering_rationale": "brief reason considering all {group_size} members"}}
+Return top 10 flights as JSON: {{"recommended_flights": [{{"id": 1}}, {{"id": 2}}, ...], "filtering_rationale": "brief reason considering the traveler profile and preferences"}}
 
 Flights: {json.dumps(enhanced_flights[:20])}...and {max(0, len(enhanced_flights)-20)} more"""
 
@@ -471,7 +459,7 @@ Flights: {json.dumps(enhanced_flights[:20])}...and {max(0, len(enhanced_flights)
                         "filtered_results": original_flights_filtered,
                         "total_results": len(enhanced_flights),
                         "filtering_applied": True,
-                        "reasoning": filtered_result.get("filtering_rationale", "AI filtering applied")
+                        "reasoning": filtered_result.get("filtering_rationale", "AI filtering applied based on traveler profile")
                     }
                 
             except json.JSONDecodeError as e:
@@ -500,19 +488,19 @@ Flights: {json.dumps(enhanced_flights[:20])}...and {max(0, len(enhanced_flights)
 
     @openai_api_retry
     async def _filter_hotels_with_ai_enhanced(self, enhanced_hotels: List[Dict[str, Any]], 
-                                            group_summary: str, group_size: int,
+                                            profile_summary: str, profile_count: int,
                                             hotel_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """ENHANCED: Use AI to filter hotels optimized for larger groups - NO TIMEOUT LIMITS with Tenacity retry strategies"""
+        """ENHANCED: Use AI to filter hotels optimized for all users - NO TIMEOUT LIMITS with Tenacity retry strategies"""
         
         try:
-            print(f"🧠 AI filtering {len(enhanced_hotels)} hotels for group: {group_summary}")
+            print(f"🧠 AI filtering {len(enhanced_hotels)} hotels for profile: {profile_summary}")
             
-            # Ultra-short prompt for efficiency
-            prompt = f"""Filter hotels for group: {group_summary}
+            # Ultra-short prompt for efficiency - works for both individuals and groups
+            prompt = f"""Filter hotels for traveler profile: {profile_summary}
 
-Group details: {group_summary}
+Profile details: {profile_summary}
 
-Return top 10 hotels as JSON: {{"recommended_hotels": [{{"id": 1}}, {{"id": 2}}, ...], "filtering_rationale": "brief reason considering all {group_size} members"}}
+Return top 10 hotels as JSON: {{"recommended_hotels": [{{"id": 1}}, {{"id": 2}}, ...], "filtering_rationale": "brief reason considering the traveler profile and preferences"}}
 
 Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20)} more"""
 
@@ -556,7 +544,7 @@ Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20
                         "filtered_results": original_hotels,
                         "total_results": len(enhanced_hotels),
                         "filtering_applied": True,
-                        "reasoning": filtered_result.get("filtering_rationale", "AI filtering applied")
+                        "reasoning": filtered_result.get("filtering_rationale", "AI filtering applied based on traveler profile")
                     }
                 
             except json.JSONDecodeError as e:
@@ -583,13 +571,54 @@ Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20
                 "reasoning": f"AI filtering error: {str(e)}"
             }
     
-    def _create_group_summary(self, group_profiles: List[Dict[str, Any]]) -> str:
-        """Create a concise summary of group preferences for AI filtering"""
+    def _create_profile_summary(self, group_profiles: List[Dict[str, Any]]) -> str:
+        """
+        UPDATED: Create a profile summary for both individual travelers and groups
+        """
         try:
             if not group_profiles:
-                return "single traveler"
+                return "unknown traveler profile"
             
-            # Extract key information
+            # Check if this is an individual traveler
+            if len(group_profiles) == 1:
+                profile = group_profiles[0]
+                summary_parts = ["1 individual traveler"]
+                
+                # Add individual preferences
+                if profile.get("travel_style"):
+                    summary_parts.append(f"style: {profile['travel_style']}")
+                
+                if profile.get("city"):
+                    summary_parts.append(f"from: {profile['city']}")
+                
+                # Calculate age if available
+                if profile.get("birthdate"):
+                    try:
+                        from datetime import date
+                        birth_year = int(profile["birthdate"][:4])
+                        current_year = date.today().year
+                        age = current_year - birth_year
+                        if 0 < age < 120:
+                            summary_parts.append(f"age: {age}")
+                    except:
+                        pass
+                
+                if profile.get("annual_income"):
+                    summary_parts.append(f"income: {profile['annual_income']}")
+                
+                if profile.get("holiday_preferences"):
+                    try:
+                        if isinstance(profile["holiday_preferences"], list):
+                            preferences = profile["holiday_preferences"][:2]  # First 2
+                        else:
+                            preferences = str(profile["holiday_preferences"])[:30]  # First 30 chars
+                        summary_parts.append(f"prefers: {preferences}")
+                    except:
+                        pass
+                
+                return "; ".join(summary_parts)
+            
+            # For groups, use the existing group logic
             travel_styles = []
             ages = []
             cities = []
@@ -613,7 +642,7 @@ Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20
                     except:
                         pass
             
-            # Create summary
+            # Create group summary
             summary_parts = [f"{len(group_profiles)} members"]
             
             if travel_styles:
@@ -634,8 +663,8 @@ Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20
             return "; ".join(summary_parts)
             
         except Exception as e:
-            logger.error(f"Error creating group summary: {e}")
-            return f"{len(group_profiles)} members"
+            logger.error(f"Error creating profile summary: {e}")
+            return f"{len(group_profiles)} traveler(s)" if group_profiles else "unknown traveler profile"
     
     def _cleanup_cache(self):
         """Keep cache size manageable"""
