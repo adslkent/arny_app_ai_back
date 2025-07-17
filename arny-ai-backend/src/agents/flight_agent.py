@@ -79,30 +79,38 @@ def retry_on_openai_http_status_error(result):
     return False
 
 def retry_on_openai_validation_failure(result):
-    """Condition 5: Retry on validation failures"""
-    if isinstance(result, AgentRunnerResponse):
-        return result.final_output is None
-    return False
+    """Condition 5: Retry if validation fails or returns empty/invalid response"""
+    try:
+        if result is None:
+            return True
+        
+        # Check if it's a valid response object
+        if hasattr(result, 'final_output'):
+            return result.final_output is None or result.final_output == ""
+        
+        # Check if it's a dict
+        if isinstance(result, dict):
+            return not result or result.get('final_output') is None
+        
+        return False
+    except Exception:
+        return True
 
 def retry_on_openai_api_exception(exception):
-    """Condition 3: Check if exception is related to OpenAI API timeouts or rate limits"""
-    exception_str = str(exception).lower()
-    return (
-        "timeout" in exception_str or
-        "rate limit" in exception_str or
-        "429" in exception_str or
-        "502" in exception_str or
-        "503" in exception_str or
-        "504" in exception_str
-    )
+    """Condition 4: Retry on specific API exceptions"""
+    import openai
+    return isinstance(exception, (
+        openai.APIError,
+        openai.APITimeoutError,
+        openai.RateLimitError,
+        openai.InternalServerError,
+        openai.APIConnectionError
+    ))
 
-# ==================== RETRY DECORATORS ====================
-
+# FIXED: Corrected retry configuration with proper regex pattern syntax
 openai_agents_sdk_retry = retry(
-    reraise=True,
     retry=retry_any(
-        # Condition 3: OpenAI API exceptions (timeouts, rate limits, server errors)
-        # FIXED: Moved (?i) flag to the beginning of the regex pattern
+        # FIXED: Moved (?i) flag to beginning of regex pattern
         retry_if_exception_message(match=r"(?i).*(timeout|rate.limit|429|502|503|504).*"),
         # Condition 4: Exception types and custom checkers
         retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
@@ -119,23 +127,35 @@ openai_agents_sdk_retry = retry(
     before_sleep=before_sleep_log(logger, logging.WARNING)
 )
 
-def _run_async_safely(coro):
-    """Run async coroutine safely by using the current event loop or creating a new one"""
+# ==================== HELPER FUNCTIONS ====================
+
+def get_event_loop():
+    """Get or create event loop"""
     try:
-        loop = asyncio.get_running_loop()
-        # If there's already a running loop, we need to run in a thread
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(_run_in_new_loop, coro)
-            return future.result()
+        return asyncio.get_event_loop()
     except RuntimeError:
-        # No running loop, we can use asyncio.run
-        return asyncio.run(coro)
+        return asyncio.new_event_loop()
+
+def sync_run_coroutine(coro):
+    """Run coroutine in a new event loop if needed"""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If there's already a running loop, create a new one in a thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(_run_in_new_loop, coro)
+                return future.result()
+        else:
+            return loop.run_until_complete(coro)
+    except RuntimeError:
+        return _run_in_new_loop(coro)
 
 def _run_in_new_loop(coro):
-    """Run coroutine in a completely new event loop"""
+    """Run coroutine in a new event loop"""
     new_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(new_loop)
     try:
+        asyncio.set_event_loop(new_loop)
         return new_loop.run_until_complete(coro)
     finally:
         new_loop.close()
@@ -199,106 +219,107 @@ async def search_flights_tool(origin: str, destination: str, departure_date: str
         # OPTIMIZATION 1: Check cache first
         search_key = f"{origin}_{destination}_{departure_date}_{return_date}_{passengers}"
         if hasattr(flight_agent, '_search_cache') and search_key in flight_agent._search_cache:
-            print(f"⚡ Cache hit! Returning cached results for {search_key}")
+            print(f"⚡ Cache hit! Returning cached results")
             cached_result = flight_agent._search_cache[search_key]
             
-            # Update latest search results in agent
-            flight_agent.latest_search_results = cached_result.get("results", [])
-            flight_agent.latest_search_id = cached_result.get("search_id")
-            flight_agent.latest_filtering_info = cached_result.get("filtering_info", {})
+            # Update instance variables for response
+            flight_agent.latest_search_results = cached_result.get('results', [])
+            flight_agent.latest_search_id = cached_result.get('search_id')
+            flight_agent.latest_filtering_info = cached_result.get('filtering_info', {})
             
             return cached_result
         
-        # Convert city names to airport codes
+        # OPTIMIZATION 2: Convert cities to airport codes
         origin_code = get_airport_code(origin)
         destination_code = get_airport_code(destination)
         
-        print(f"🗺️ Airport codes: {origin} -> {origin_code}, {destination} -> {destination_code}")
+        print(f"🔧 Converted: {origin} → {origin_code}, {destination} → {destination_code}")
         
-        # OPTIMIZATION 2: Increase max_results to 50 for enhanced filtering
-        flights_response = await flight_agent.amadeus_service.search_flights(
+        # OPTIMIZATION 3: Validate dates
+        try:
+            departure_datetime = datetime.strptime(departure_date, "%Y-%m-%d")
+            if departure_datetime < datetime.now():
+                return {
+                    "success": False,
+                    "error": "Departure date cannot be in the past",
+                    "message": "Please provide a future departure date."
+                }
+        except ValueError:
+            return {
+                "success": False,
+                "error": "Invalid date format",
+                "message": "Please provide dates in YYYY-MM-DD format."
+            }
+        
+        # OPTIMIZATION 4: Search flights using Amadeus with ENHANCED parameters for larger datasets
+        search_results = await flight_agent.amadeus_service.search_flights(
             origin=origin_code,
             destination=destination_code,
             departure_date=departure_date,
             return_date=return_date,
             adults=passengers,
-            max_results=50  # ENHANCED: Fetch up to 50 results for better filtering
+            max_results=50  # ENHANCED: Get up to 50 results for better filtering
         )
         
-        if not flights_response.get("success"):
+        if not search_results or "data" not in search_results:
             return {
                 "success": False,
-                "error": flights_response.get("error", "Flight search failed"),
-                "message": "I couldn't find flights for those dates. Please try different dates or destinations."
+                "error": "No flights found",
+                "message": f"I couldn't find any flights from {origin} to {destination} on {departure_date}. Please try different dates or destinations."
             }
         
-        raw_flights = flights_response.get("results", [])
-        print(f"✅ Amadeus returned {len(raw_flights)} flights")
+        flights = search_results["data"]
+        print(f"🔍 Found {len(flights)} flights from Amadeus API")
         
-        if not raw_flights:
-            return {
-                "success": True,
-                "results": [],
-                "message": f"No flights found from {origin} to {destination} on {departure_date}. Try different dates?",
-                "search_params": {
-                    "origin": origin_code,
-                    "destination": destination_code,
-                    "departure_date": departure_date,
-                    "return_date": return_date,
-                    "passengers": passengers
-                }
-            }
+        # OPTIMIZATION 5: Store in database with enhanced metadata
+        user_id = flight_agent.current_user_id
+        session_id = flight_agent.current_session_id
         
-        # OPTIMIZATION 3: Save search to database (non-blocking)
         flight_search = FlightSearch(
             id=str(uuid.uuid4()),
-            user_id=flight_agent.current_user_id,
-            session_id=flight_agent.current_session_id,
+            user_id=user_id,
+            session_id=session_id,
             origin=origin_code,
             destination=destination_code,
             departure_date=departure_date,
             return_date=return_date,
             passengers=passengers,
-            search_results=raw_flights,
-            created_at=datetime.now()
+            search_results=flights,
+            search_timestamp=datetime.now()
         )
         
-        # OPTIMIZATION 4: Save to database without blocking the response
-        try:
-            await flight_agent.db.save_flight_search(flight_search)
-            print(f"💾 Saved flight search to database: {flight_search.id}")
-        except Exception as e:
-            print(f"⚠️ Database save failed (non-critical): {e}")
+        await flight_agent.db.save_flight_search(flight_search)
+        print(f"💾 Saved search with ID: {flight_search.id}")
         
-        # OPTIMIZATION 5: Apply user profile filtering
-        print(f"🎯 Applying profile filtering to {len(raw_flights)} flights...")
+        # OPTIMIZATION 6: ENHANCED filtering with profile agent (send ALL flights for filtering)
+        print(f"🎯 Filtering {len(flights)} flights with user profile...")
+        filtering_start = datetime.now()
         
-        filtering_result = await flight_agent.profile_agent.filter_flight_results(
-            user_id=flight_agent.current_user_id,
-            flight_results=raw_flights[:50],  # ENHANCED: Process up to 50 flights
-            search_params={
-                "origin": origin_code,
-                "destination": destination_code,
-                "departure_date": departure_date,
-                "return_date": return_date,
-                "passengers": passengers
-            }
+        filtering_result = await flight_agent.profile_agent.filter_flights_enhanced(
+            flights=flights,  # Send ALL flights for filtering
+            user_profile=flight_agent.user_profile
         )
         
-        print(f"✅ Profile filtering completed: {len(filtering_result['filtered_results'])} results")
+        filtering_time = (datetime.now() - filtering_start).total_seconds()
+        print(f"🎯 Profile filtering completed in {filtering_time:.2f}s")
         
-        # OPTIMIZATION 6: Store filtered results in agent for response
-        flight_agent.latest_search_results = filtering_result['filtered_results']
+        filtered_flights = filtering_result.get('filtered_results', flights[:10])  # Fallback to first 10
+        filtering_info = filtering_result.get('filtering_info', {})
+        
+        print(f"✅ Filtered to {len(filtered_flights)} flights based on user preferences")
+        
+        # OPTIMIZATION 7: Update instance variables for response (FIXED to use filtered results)
+        flight_agent.latest_search_results = filtered_flights
         flight_agent.latest_search_id = flight_search.id
-        flight_agent.latest_filtering_info = filtering_result.get('filtering_info', {})
+        flight_agent.latest_filtering_info = filtering_info
         
-        # Build response
+        # OPTIMIZATION 8: Build response
         response = {
             "success": True,
-            "results": filtering_result['filtered_results'],
+            "results": filtered_flights,
             "search_id": flight_search.id,
-            "filtering_info": filtering_result.get('filtering_info', {}),
-            "message": f"Found {len(filtering_result['filtered_results'])} flights from {origin} to {destination}",
+            "filtering_info": filtering_info,
+            "message": f"Found {len(filtered_flights)} flights from {origin} to {destination}",
             "search_params": {
                 "origin": origin_code,
                 "destination": destination_code,
@@ -308,7 +329,7 @@ async def search_flights_tool(origin: str, destination: str, departure_date: str
             }
         }
         
-        # OPTIMIZATION 7: Cache the response
+        # OPTIMIZATION 9: Cache the response
         if not hasattr(flight_agent, '_search_cache'):
             flight_agent._search_cache = {}
         flight_agent._search_cache[search_key] = response
@@ -331,44 +352,55 @@ async def search_flights_tool(origin: str, destination: str, departure_date: str
 @function_tool
 async def search_airports_tool(query: str) -> dict:
     """
-    Search for airports by name or code
+    Search for airports by city or airport code
     
     Args:
-        query: Airport name, city name, or airport code to search for
+        query: Airport code or city name to search for
     
     Returns:
-        Dict with airport search results
+        Dict with airport information
     """
+    
     try:
         flight_agent = _get_flight_agent()
         if not flight_agent:
             return {"success": False, "error": "Flight agent not available"}
         
-        airports_response = await flight_agent.amadeus_service.search_airports(query)
+        print(f"🏢 Searching airports for: {query}")
         
-        if not airports_response.get("success"):
-            return {
-                "success": False,
-                "error": airports_response.get("error", "Airport search failed"),
-                "message": f"I couldn't find airports matching '{query}'. Please try a different search term."
-            }
-        
-        airports = airports_response.get("results", [])
-        
-        if not airports:
+        # Check if it's a known airport code mapping first
+        airport_code = get_airport_code(query)
+        if airport_code in AIRPORT_CODE_MAPPING.values():
+            # Return direct match from our mapping
+            city_name = next((city for city, code in AIRPORT_CODE_MAPPING.items() if code == airport_code), query)
             return {
                 "success": True,
-                "results": [],
-                "message": f"No airports found for '{query}'. Try searching for a city name or airport code."
+                "airports": [{
+                    "code": airport_code,
+                    "city": city_name.title(),
+                    "name": f"{city_name.title()} Airport"
+                }],
+                "message": f"Found airport: {airport_code} - {city_name.title()}"
             }
         
-        return {
-            "success": True,
-            "results": airports,
-            "message": f"Found {len(airports)} airports matching '{query}'"
-        }
+        # For other queries, use Amadeus airport search
+        result = await flight_agent.amadeus_service.search_airports(query)
+        
+        if result and "data" in result:
+            airports = result["data"][:5]  # Limit to 5 results
+            return {
+                "success": True,
+                "airports": airports,
+                "message": f"Found {len(airports)} airports matching '{query}'"
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"No airports found for '{query}'"
+            }
         
     except Exception as e:
+        print(f"❌ Error in airport search: {e}")
         return {
             "success": False,
             "error": str(e),
@@ -376,36 +408,44 @@ async def search_airports_tool(query: str) -> dict:
         }
 
 @function_tool
-def get_flight_status_tool(flight_number: str, flight_date: str) -> dict:
+async def get_flight_status_tool(flight_number: str, date: str) -> dict:
     """
     Get real-time flight status information
     
     Args:
-        flight_number: Flight number (e.g., 'QF1', 'AA100')
-        flight_date: Flight date in YYYY-MM-DD format
+        flight_number: Flight number (e.g., 'QF1', 'UA123')
+        date: Flight date in YYYY-MM-DD format
     
     Returns:
         Dict with flight status information
     """
+    
     try:
         flight_agent = _get_flight_agent()
         if not flight_agent:
             return {"success": False, "error": "Flight agent not available"}
         
-        # For now, return a mock response
-        # In production, this would call Amadeus On Demand Flight Status API
+        print(f"📡 Getting flight status for: {flight_number} on {date}")
+        
+        # Use Amadeus On Demand Flight Status API
+        result = await flight_agent.amadeus_service.get_flight_status(flight_number, date)
+        
+        if result and "data" in result:
+            flight_data = result["data"][0] if result["data"] else None
+            if flight_data:
+                return {
+                    "success": True,
+                    "flight_status": flight_data,
+                    "message": f"Flight {flight_number} status updated"
+                }
+        
         return {
-            "success": True,
-            "message": f"Getting real-time status for flight {flight_number} on {flight_date}...",
-            "flight_number": flight_number,
-            "flight_date": flight_date,
-            "status": {
-                "note": "This would contain real-time flight status from Amadeus On Demand Flight Status API",
-                "includes": ["departure_time", "arrival_time", "delays", "gate_info", "terminal_info"]
-            }
+            "success": False,
+            "message": f"No status information found for flight {flight_number} on {date}"
         }
         
     except Exception as e:
+        print(f"❌ Error getting flight status: {e}")
         return {
             "success": False,
             "error": str(e),
@@ -413,76 +453,82 @@ def get_flight_status_tool(flight_number: str, flight_date: str) -> dict:
         }
 
 @function_tool
-def get_checkin_links_tool(airline_code: str) -> dict:
+async def get_checkin_links_tool(airline_code: str) -> dict:
     """
     Get online check-in links for airlines
     
     Args:
-        airline_code: IATA airline code (e.g., 'QF', 'AA', 'BA')
+        airline_code: Two-letter airline code (e.g., 'QF', 'UA', 'BA')
     
     Returns:
-        Dict with check-in information
+        Dict with check-in link information
     """
+    
     try:
+        print(f"🔗 Getting check-in link for airline: {airline_code}")
+        
         # Common airline check-in links
         checkin_links = {
-            'QF': 'https://www.qantas.com/au/en/booking-and-travel/online-check-in.html',
-            'JQ': 'https://www.jetstar.com/au/en/help/online-check-in',
-            'VA': 'https://www.virginaustralia.com/au/en/book/online-check-in/',
-            'AA': 'https://www.aa.com/travelInformation/checkin/online_checkin.do',
-            'UA': 'https://www.united.com/en/us/check-in',
+            'QF': 'https://www.qantas.com/au/en/flight-status.html',
+            'JQ': 'https://www.jetstar.com/au/en/flights/manage-booking',
+            'VA': 'https://www.virginaustralia.com/au/en/manage/check-in/',
+            'TT': 'https://www.tigerair.com.au/manage-booking/',
+            'UA': 'https://www.united.com/ual/en/us/flight-search/checkin',
+            'AA': 'https://www.aa.com/homePage.do',
             'DL': 'https://www.delta.com/us/en/check-in/overview',
-            'BA': 'https://www.britishairways.com/en-gb/information/checking-in',
-            'LH': 'https://www.lufthansa.com/de/en/online-check-in',
-            'AF': 'https://www.airfrance.us/US/en/common/page_flottante/information/check-in-online.htm',
-            'SQ': 'https://www.singaporeair.com/en_UK/us/booking-and-travel/online-checkin/',
-            'EK': 'https://www.emirates.com/us/english/manage-booking/online-check-in/',
-            'TG': 'https://www.thaiairways.com/en_US/manage/check_in_online.page'
+            'BA': 'https://www.britishairways.com/travel/olcilandingpageauto/public/en_us',
+            'AF': 'https://www.airfrance.us/US/en/local/resainfovol/ediinfovol/online_checkin.htm',
+            'LH': 'https://www.lufthansa.com/us/en/online-check-in',
+            'SQ': 'https://www.singaporeair.com/en_UK/us/travel-info/online-checkin/',
+            'TG': 'https://www.thaiairways.com/en/check_in_online/check_in_online.page'
         }
         
-        link = checkin_links.get(airline_code.upper())
-        
-        if link:
+        if airline_code.upper() in checkin_links:
             return {
                 "success": True,
+                "checkin_link": checkin_links[airline_code.upper()],
                 "airline_code": airline_code.upper(),
-                "checkin_link": link,
-                "message": f"Here's the online check-in link for {airline_code.upper()}: {link}"
+                "message": f"Check-in link for {airline_code.upper()} airline"
             }
         else:
             return {
                 "success": False,
-                "error": "Airline not found",
-                "message": f"I don't have the check-in link for airline '{airline_code}'. Please visit the airline's website directly."
+                "message": f"Check-in link not available for airline {airline_code}. Please visit the airline's website directly."
             }
         
     except Exception as e:
+        print(f"❌ Error getting check-in link: {e}")
         return {
             "success": False,
             "error": str(e),
-            "message": f"I encountered an error getting check-in links: {str(e)}"
+            "message": f"I encountered an error getting check-in link: {str(e)}"
         }
 
 @function_tool
-def get_flight_pricing_tool(flight_number: str) -> dict:
+async def get_flight_pricing_tool(flight_number: str) -> dict:
     """
-    Get detailed pricing for a specific flight
+    Get detailed pricing information for a specific flight
     
     Args:
-        flight_number: Flight number or position from search results (e.g., "1", "flight 2")
+        flight_number: Flight reference number from search results
     
     Returns:
-        Dict with detailed flight pricing information
+        Dict with detailed pricing information
     """
+    
     try:
-        # Extract number from flight selection
-        import re
-        numbers = re.findall(r'\d+', flight_number)
-        if not numbers:
+        flight_agent = _get_flight_agent()
+        if not flight_agent:
+            return {"success": False, "error": "Flight agent not available"}
+        
+        print(f"💰 Getting pricing for flight: {flight_number}")
+        
+        # Check if flight_number is valid
+        if not flight_number:
             return {
                 "success": False,
-                "error": "Invalid flight selection",
-                "message": "I need a flight number to get pricing. Please specify like 'flight 1' or 'the first option'."
+                "error": "Flight number is required",
+                "message": "Please specify like 'flight 1' or 'the first option'."
             }
         
         # For now, return a detailed pricing response
@@ -535,8 +581,9 @@ class FlightAgent:
         # Set up the global instance
         _current_flight_agent = self
         
-        # ENHANCED: Create agent with tools
+        # ENHANCED: Create agent with tools - FIXED: Added required 'name' parameter
         self.agent = Agent(
+            name="flight_search_agent",  # FIXED: Added required name parameter
             model="o4-mini",
             instructions=self._get_system_instructions(),
             tools=[
@@ -572,22 +619,20 @@ class FlightAgent:
             self.current_session_id = session_id
             self.user_profile = user_profile
             
-            # FIXED: Also update the global instance to ensure tools have access
+            # Update the global instance (ENHANCED)
             global _current_flight_agent
             _current_flight_agent.current_user_id = user_id
             _current_flight_agent.current_session_id = session_id
             _current_flight_agent.user_profile = user_profile
-            # FIXED: Clear global instance results as well
             _current_flight_agent.latest_search_results = []
             _current_flight_agent.latest_search_id = None
             _current_flight_agent.latest_filtering_info = {}
             
-            print(f"🔧 Context set: user_id={user_id}, session_id={session_id}")
+            print(f"🔧 Context set: user_id={user_id}")
             
-            # Build conversation context
+            # Build conversation context (optimized for performance)
             context_messages = []
-            
-            # UNIFIED CONTEXT: Add recent conversation history (last 50 messages)
+            # ENHANCED CONTEXT: Use last 50 messages for context (improved from previous 20)
             for msg in conversation_history[-50:]:
                 context_messages.append({
                     "role": msg.message_type,
@@ -596,7 +641,7 @@ class FlightAgent:
             
             print(f"🔧 Processing with {len(context_messages)} previous messages")
             
-            # Process with agent using retry logic
+            # ENHANCED: Direct agent processing with improved efficiency and NO TIMEOUT LIMITS
             if not context_messages:
                 # First message in conversation
                 print("🚀 Starting new flight conversation")
@@ -697,49 +742,47 @@ Tomorrow's date: {tomorrow}
 
 5. **Missing Information**: If critical details are missing, ask for clarification before searching.
 
-Examples:
-- "Find flights from Sydney to Los Angeles on March 15th" → search_flights_tool(origin="Sydney", destination="Los Angeles", departure_date="2025-03-15")
-- "I need a return flight from London to New York, leaving Feb 20, coming back Feb 27" → search_flights_tool(origin="London", destination="New York", departure_date="2025-02-20", return_date="2025-02-27")
-"""
+Remember: You are a specialized flight search agent. Focus on flight-related queries and use your tools effectively to provide the best flight options for users."""
 
     @openai_agents_sdk_retry
-    async def _run_agent_with_retry(self, agent, message_or_messages):
-        """
-        Run agent with comprehensive retry logic and NO TIMEOUT LIMITS
-        """
-        print(f"🤖 Running agent with message type: {type(message_or_messages)}")
+    async def _run_agent_with_retry(self, agent, messages):
+        """Run agent with retry logic and validation - ENHANCED for NO TIMEOUT LIMITS"""
         
         try:
-            if isinstance(message_or_messages, str):
+            print(f"🔄 Running agent with retry logic...")
+            
+            # ENHANCED: Use Runner.run_sync for improved reliability
+            if isinstance(messages, str):
                 # Single message
-                with Runner(agent) as runner:
-                    result = runner.run(message_or_messages)
-                    return result
-            elif isinstance(message_or_messages, list):
-                # Message history
-                with Runner(agent) as runner:
-                    result = runner.run_stream(message_or_messages)
-                    # Get the final result from the stream
-                    final_result = None
-                    for chunk in result:
-                        if hasattr(chunk, 'final_output') and chunk.final_output:
-                            final_result = chunk
-                    return final_result or AgentRunnerResponse(final_output="I'm ready to help you with flight searches!")
+                runner = Runner(agent=agent)
+                result = runner.run_sync(content_str=messages)
             else:
-                raise ValueError(f"Invalid message type: {type(message_or_messages)}")
-                
+                # Multiple messages (conversation context)
+                runner = Runner(agent=agent)
+                result = runner.run_sync(messages=messages)
+            
+            # ENHANCED: Validate result and ensure it has the required structure
+            if not result:
+                raise ValueError("Agent returned empty result")
+            
+            # Convert to our expected format if needed
+            if hasattr(result, 'final_output'):
+                validated_result = AgentRunnerResponse(final_output=result.final_output)
+            elif isinstance(result, dict) and 'final_output' in result:
+                validated_result = AgentRunnerResponse(**result)
+            else:
+                # Try to extract message from different result formats
+                if hasattr(result, 'content'):
+                    validated_result = AgentRunnerResponse(final_output=str(result.content))
+                elif hasattr(result, 'message'):
+                    validated_result = AgentRunnerResponse(final_output=str(result.message))
+                else:
+                    validated_result = AgentRunnerResponse(final_output=str(result))
+            
+            print(f"✅ Agent execution successful")
+            return validated_result
+            
         except Exception as e:
-            print(f"❌ Agent execution error: {e}")
-            # Return a valid response structure even on error
-            return AgentRunnerResponse(final_output=f"I encountered an error processing your request: {str(e)}")
-
-# ==================== MODULE EXPORTS ====================
-
-__all__ = [
-    'FlightAgent',
-    'search_flights_tool',
-    'search_airports_tool',
-    'get_flight_status_tool',
-    'get_checkin_links_tool',
-    'get_flight_pricing_tool'
-]
+            print(f"❌ Agent execution failed: {e}")
+            # Re-raise for retry logic to catch
+            raise e
