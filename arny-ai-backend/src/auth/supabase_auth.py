@@ -1,5 +1,5 @@
 """
-Supabase authentication service for Arny AI
+Supabase authentication service for Arny AI - Enhanced with Tenacity retry strategies
 
 This module provides authentication services using Supabase Auth including:
 - User registration (sign up)
@@ -9,6 +9,7 @@ This module provides authentication services using Supabase Auth including:
 - Password reset functionality
 
 The service handles JWT tokens and integrates with Supabase's authentication system.
+Enhanced with comprehensive retry strategies using Tenacity.
 """
 
 from typing import Optional, Dict, Any
@@ -17,15 +18,85 @@ import json
 import logging
 import requests
 import time
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    retry_if_exception_message,
+    retry_any,
+    retry_if_result,
+    before_sleep_log
+)
+from pydantic import BaseModel, ValidationError
 
 from ..utils.config import config
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
+# Pydantic models for validation
+class AuthUser(BaseModel):
+    id: str
+    email: str
+    confirmed: bool
+    created_at: Optional[str] = None
+    last_sign_in: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+class AuthSession(BaseModel):
+    access_token: str
+    refresh_token: str
+    expires_at: Optional[str] = None
+    token_type: str = "bearer"
+
+class AuthResponse(BaseModel):
+    success: bool
+    user: Optional[AuthUser] = None
+    session: Optional[AuthSession] = None
+    message: Optional[str] = None
+    error: Optional[str] = None
+
+# Custom retry conditions
+def retry_on_supabase_error(result):
+    """Retry if result contains error or warning fields"""
+    if isinstance(result, dict):
+        return (
+            result.get("success") is False or
+            "error" in result or
+            "warning" in result or
+            result.get("error") is not None
+        )
+    return False
+
+def retry_on_validation_error(result):
+    """Retry if result fails Pydantic validation"""
+    if isinstance(result, dict) and result.get("success"):
+        try:
+            if result.get("user") and result.get("session"):
+                AuthUser(**result["user"])
+                AuthSession(**result["session"])
+            return False
+        except ValidationError:
+            return True
+    return False
+
+# Combined retry strategy
+supabase_retry = retry(
+    retry=retry_any(
+        retry_if_exception_type((ConnectionError, TimeoutError, requests.exceptions.RequestException)),
+        retry_if_exception_message(match=r".*(timeout|failed|unavailable|network|connection).*"),
+        retry_if_result(retry_on_supabase_error),
+        retry_if_result(retry_on_validation_error)
+    ),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    before_sleep=before_sleep_log(logger, logging.WARNING)
+)
+
 class SupabaseAuth:
     """
-    Supabase authentication service
+    Supabase authentication service with Tenacity retry strategies
     
     Provides methods for user authentication, session management,
     and token verification using Supabase Auth.
@@ -43,9 +114,10 @@ class SupabaseAuth:
             logger.error(f"Failed to initialize Supabase client: {e}")
             raise
     
+    @supabase_retry
     async def sign_up(self, email: str, password: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Sign up a new user
+        Sign up a new user with retry strategies
         
         Args:
             email: User's email address
@@ -89,7 +161,7 @@ class SupabaseAuth:
             
             if response.user:
                 logger.info(f"User signed up successfully: {email}")
-                return {
+                result = {
                     "success": True,
                     "user": {
                         "id": response.user.id,
@@ -106,6 +178,21 @@ class SupabaseAuth:
                     },
                     "message": "User created successfully. Please check your email for confirmation if email confirmation is enabled."
                 }
+                
+                # Validate result
+                try:
+                    if result["user"]:
+                        AuthUser(**result["user"])
+                    if result["session"] and result["session"]["access_token"]:
+                        AuthSession(**result["session"])
+                except ValidationError as ve:
+                    logger.error(f"Validation error in sign_up response: {ve}")
+                    return {
+                        "success": False,
+                        "error": "Invalid response format from authentication service"
+                    }
+                
+                return result
             else:
                 logger.warning(f"Signup failed for user: {email} - No user returned")
                 return {
@@ -139,9 +226,10 @@ class SupabaseAuth:
                     "error": f"Signup failed: {error_message}"
                 }
     
+    @supabase_retry
     async def sign_in(self, email: str, password: str) -> Dict[str, Any]:
         """
-        Sign in an existing user
+        Sign in an existing user with retry strategies
         
         Args:
             email: User's email address
@@ -170,7 +258,7 @@ class SupabaseAuth:
             
             if response.user and response.session:
                 logger.info(f"User signed in successfully: {email}")
-                return {
+                result = {
                     "success": True,
                     "user": {
                         "id": response.user.id,
@@ -187,6 +275,19 @@ class SupabaseAuth:
                     },
                     "message": "Signed in successfully"
                 }
+                
+                # Validate result
+                try:
+                    AuthUser(**result["user"])
+                    AuthSession(**result["session"])
+                except ValidationError as ve:
+                    logger.error(f"Validation error in sign_in response: {ve}")
+                    return {
+                        "success": False,
+                        "error": "Invalid response format from authentication service"
+                    }
+                
+                return result
             else:
                 logger.warning(f"Sign in failed for user: {email} - Invalid credentials")
                 return {
@@ -220,9 +321,10 @@ class SupabaseAuth:
                     "error": f"Sign in failed: {error_message}"
                 }
     
+    @supabase_retry
     async def refresh_session(self, refresh_token: str) -> Dict[str, Any]:
         """
-        Refresh user session using refresh token
+        Refresh user session using refresh token with retry strategies
         
         Args:
             refresh_token: Valid refresh token
@@ -243,7 +345,7 @@ class SupabaseAuth:
             
             if response.session:
                 logger.info("Session refreshed successfully")
-                return {
+                result = {
                     "success": True,
                     "session": {
                         "access_token": response.session.access_token,
@@ -258,6 +360,20 @@ class SupabaseAuth:
                     } if response.user else None,
                     "message": "Session refreshed successfully"
                 }
+                
+                # Validate result
+                try:
+                    AuthSession(**result["session"])
+                    if result["user"]:
+                        AuthUser(**result["user"])
+                except ValidationError as ve:
+                    logger.error(f"Validation error in refresh_session response: {ve}")
+                    return {
+                        "success": False,
+                        "error": "Invalid response format from authentication service"
+                    }
+                
+                return result
             else:
                 logger.warning("Session refresh failed - Invalid refresh token")
                 return {
@@ -280,9 +396,10 @@ class SupabaseAuth:
                     "error": f"Session refresh failed: {error_message}"
                 }
     
+    @supabase_retry
     async def sign_out(self) -> Dict[str, Any]:
         """
-        Sign out the current user
+        Sign out the current user with retry strategies
         
         Returns:
             Response indicating success or error
@@ -305,9 +422,10 @@ class SupabaseAuth:
                 "error": f"Sign out failed: {str(e)}"
             }
     
+    @supabase_retry
     async def get_user(self, access_token: str) -> Dict[str, Any]:
         """
-        Get user info from access token with multiple verification methods
+        Get user info from access token with multiple verification methods and retry strategies
         
         Args:
             access_token: User's access token
@@ -343,7 +461,7 @@ class SupabaseAuth:
                     user_data = response.json()
                     logger.info(f"User retrieved successfully via REST API: {user_data.get('email', 'unknown')}")
                     
-                    return {
+                    result = {
                         "success": True,
                         "user": {
                             "id": user_data.get("id"),
@@ -354,6 +472,18 @@ class SupabaseAuth:
                             "metadata": user_data.get("user_metadata", {})
                         }
                     }
+                    
+                    # Validate result
+                    try:
+                        AuthUser(**result["user"])
+                    except ValidationError as ve:
+                        logger.error(f"Validation error in get_user response: {ve}")
+                        return {
+                            "success": False,
+                            "error": "Invalid user data format"
+                        }
+                    
+                    return result
                 else:
                     logger.warning(f"REST API failed with status {response.status_code}: {response.text}")
                     
@@ -386,7 +516,7 @@ class SupabaseAuth:
                 
                 if user_id and email:
                     logger.info(f"User retrieved successfully via JWT decode: {email}")
-                    return {
+                    result = {
                         "success": True,
                         "user": {
                             "id": user_id,
@@ -397,6 +527,18 @@ class SupabaseAuth:
                             "metadata": decoded_token.get("user_metadata", {})
                         }
                     }
+                    
+                    # Validate result
+                    try:
+                        AuthUser(**result["user"])
+                    except ValidationError as ve:
+                        logger.error(f"Validation error in JWT decode response: {ve}")
+                        return {
+                            "success": False,
+                            "error": "Invalid user data format"
+                        }
+                    
+                    return result
                 else:
                     logger.warning("JWT token missing required fields")
                     
@@ -417,7 +559,7 @@ class SupabaseAuth:
                     
                     if user_response and user_response.user:
                         logger.info(f"User retrieved successfully via Supabase client: {user_response.user.email}")
-                        return {
+                        result = {
                             "success": True,
                             "user": {
                                 "id": user_response.user.id,
@@ -428,6 +570,18 @@ class SupabaseAuth:
                                 "metadata": user_response.user.user_metadata or {}
                             }
                         }
+                        
+                        # Validate result
+                        try:
+                            AuthUser(**result["user"])
+                        except ValidationError as ve:
+                            logger.error(f"Validation error in Supabase client response: {ve}")
+                            return {
+                                "success": False,
+                                "error": "Invalid user data format"
+                            }
+                        
+                        return result
                 except Exception as session_error:
                     logger.warning(f"Supabase client session method failed: {str(session_error)}")
                     
@@ -448,9 +602,10 @@ class SupabaseAuth:
                 "error": f"Failed to get user: {str(e)}"
             }
     
+    @supabase_retry
     async def reset_password(self, email: str, redirect_to: Optional[str] = None) -> Dict[str, Any]:
         """
-        Send password reset email
+        Send password reset email with retry strategies
         
         Args:
             email: User's email address
@@ -547,9 +702,10 @@ class SupabaseAuth:
                 "error": f"Token verification failed: {str(e)}"
             }
     
+    @supabase_retry
     async def update_user(self, access_token: str, updates: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Update user information
+        Update user information with retry strategies
         
         Args:
             access_token: User's access token
@@ -575,7 +731,7 @@ class SupabaseAuth:
             
             if response.user:
                 logger.info("User updated successfully")
-                return {
+                result = {
                     "success": True,
                     "user": {
                         "id": response.user.id,
@@ -585,6 +741,18 @@ class SupabaseAuth:
                     },
                     "message": "User updated successfully"
                 }
+                
+                # Validate result
+                try:
+                    AuthUser(**result["user"])
+                except ValidationError as ve:
+                    logger.error(f"Validation error in update_user response: {ve}")
+                    return {
+                        "success": False,
+                        "error": "Invalid user data format"
+                    }
+                
+                return result
             else:
                 logger.warning("User update failed")
                 return {
