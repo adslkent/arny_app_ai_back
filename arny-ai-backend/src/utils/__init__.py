@@ -28,7 +28,15 @@ import uuid
 import hashlib
 from datetime import datetime, date, timedelta
 from typing import Optional, Dict, Any, List, Union
-from email_validator import validate_email as email_validate, EmailNotValidError
+
+# FIXED: Handle email_validator import with fallback
+try:
+    from email_validator import validate_email as email_validate, EmailNotValidError
+    EMAIL_VALIDATOR_AVAILABLE = True
+except ImportError:
+    # Fallback if email_validator is not available
+    EMAIL_VALIDATOR_AVAILABLE = False
+    EmailNotValidError = ValueError
 
 from .config import Config, config
 from .group_codes import GroupCodeGenerator
@@ -176,7 +184,7 @@ def format_group_code(code: str) -> str:
 
 def validate_email(email: str) -> bool:
     """
-    Validate email address format
+    FIXED: Validate email address format with fallback
     
     Args:
         email: Email address to validate
@@ -184,11 +192,20 @@ def validate_email(email: str) -> bool:
     Returns:
         True if valid, False otherwise
     """
-    try:
-        email_validate(email)
-        return True
-    except EmailNotValidError:
+    if not email or not isinstance(email, str):
         return False
+    
+    # First try with email_validator if available
+    if EMAIL_VALIDATOR_AVAILABLE:
+        try:
+            email_validate(email)
+            return True
+        except EmailNotValidError:
+            return False
+    
+    # Fallback to regex validation
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(email_pattern, email.strip()))
 
 def validate_phone(phone: str, country_code: str = 'international') -> bool:
     """
@@ -201,6 +218,9 @@ def validate_phone(phone: str, country_code: str = 'international') -> bool:
     Returns:
         True if valid, False otherwise
     """
+    if not phone or not isinstance(phone, str):
+        return False
+        
     if country_code not in PHONE_REGEX_PATTERNS:
         country_code = 'international'
     
@@ -218,6 +238,9 @@ def validate_date(date_string: str, date_format: str = DEFAULT_DATE_FORMAT) -> b
     Returns:
         True if valid, False otherwise
     """
+    if not date_string or not isinstance(date_string, str):
+        return False
+        
     try:
         datetime.strptime(date_string, date_format)
         return True
@@ -234,6 +257,9 @@ def validate_uuid(uuid_string: str) -> bool:
     Returns:
         True if valid, False otherwise
     """
+    if not uuid_string or not isinstance(uuid_string, str):
+        return False
+        
     try:
         uuid.UUID(uuid_string)
         return True
@@ -267,14 +293,13 @@ def format_date(date_obj: Union[datetime, date, str], output_format: str = DEFAU
     """
     if isinstance(date_obj, str):
         # Try to parse string date
-        for fmt in [DEFAULT_DATE_FORMAT, DEFAULT_DATETIME_FORMAT, "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%fZ"]:
+        try:
+            date_obj = datetime.strptime(date_obj, DEFAULT_DATE_FORMAT).date()
+        except ValueError:
             try:
-                date_obj = datetime.strptime(date_obj, fmt)
-                break
+                date_obj = datetime.strptime(date_obj, DEFAULT_DATETIME_FORMAT)
             except ValueError:
-                continue
-        else:
-            return date_obj  # Return original if can't parse
+                return date_obj  # Return as-is if can't parse
     
     if isinstance(date_obj, datetime):
         return date_obj.strftime(output_format)
@@ -283,7 +308,7 @@ def format_date(date_obj: Union[datetime, date, str], output_format: str = DEFAU
     else:
         return str(date_obj)
 
-def format_currency(amount: Union[float, int, str], currency: str = 'USD', include_symbol: bool = True) -> str:
+def format_currency(amount: Union[int, float], currency: str = 'USD', include_symbol: bool = True) -> str:
     """
     Format currency amount
     
@@ -295,27 +320,26 @@ def format_currency(amount: Union[float, int, str], currency: str = 'USD', inclu
     Returns:
         Formatted currency string
     """
-    try:
-        amount = float(amount)
-    except (ValueError, TypeError):
-        return str(amount)
+    if currency not in SUPPORTED_CURRENCIES:
+        currency = 'USD'
     
-    # Currency symbols
-    symbols = {
-        'USD': '$', 'EUR': '€', 'GBP': '£', 'AUD': 'A$', 'CAD': 'C$',
-        'JPY': '¥', 'CNY': '¥', 'INR': '₹', 'SGD': 'S$', 'HKD': 'HK$'
-    }
+    # Basic formatting
+    formatted = f"{amount:,.2f}"
     
-    formatted_amount = f"{amount:,.2f}"
+    if include_symbol:
+        currency_symbols = {
+            'USD': '$', 'EUR': '€', 'GBP': '£', 'AUD': 'A$',
+            'CAD': 'C$', 'JPY': '¥', 'CNY': '¥', 'INR': '₹',
+            'SGD': 'S$', 'HKD': 'HK$'
+        }
+        symbol = currency_symbols.get(currency, currency)
+        formatted = f"{symbol}{formatted}"
     
-    if include_symbol and currency in symbols:
-        return f"{symbols[currency]}{formatted_amount}"
-    else:
-        return f"{formatted_amount} {currency}"
+    return formatted
 
 def format_phone(phone: str, country_code: str = 'international') -> str:
     """
-    Format phone number to standard format
+    Format phone number
     
     Args:
         phone: Phone number to format
@@ -327,55 +351,56 @@ def format_phone(phone: str, country_code: str = 'international') -> str:
     # Remove all non-digit characters except +
     cleaned = re.sub(r'[^\d+]', '', phone)
     
-    if country_code == 'us' and not cleaned.startswith('+'):
-        if len(cleaned) == 10:
-            return f"+1-{cleaned[:3]}-{cleaned[3:6]}-{cleaned[6:]}"
-        elif len(cleaned) == 11 and cleaned.startswith('1'):
-            return f"+{cleaned[:1]}-{cleaned[1:4]}-{cleaned[4:7]}-{cleaned[7:]}"
-    
-    return cleaned
+    # Basic formatting based on country
+    if country_code == 'us' and len(cleaned) == 10:
+        return f"({cleaned[:3]}) {cleaned[3:6]}-{cleaned[6:]}"
+    elif country_code == 'us' and len(cleaned) == 11 and cleaned.startswith('1'):
+        return f"+1 ({cleaned[1:4]}) {cleaned[4:7]}-{cleaned[7:]}"
+    else:
+        return cleaned
 
 def sanitize_string(text: str, max_length: Optional[int] = None) -> str:
     """
-    Sanitize string by removing dangerous characters
+    Sanitize string input
     
     Args:
         text: Text to sanitize
-        max_length: Maximum length to truncate to
+        max_length: Maximum length (optional)
         
     Returns:
         Sanitized string
     """
-    if not isinstance(text, str):
-        text = str(text)
+    if not text or not isinstance(text, str):
+        return ""
     
-    # Remove potentially dangerous characters
-    sanitized = re.sub(r'[<>"\';\\]', '', text)
+    # Remove extra whitespace
+    text = ' '.join(text.split())
     
-    # Normalize whitespace
-    sanitized = re.sub(r'\s+', ' ', sanitized).strip()
+    # Remove potential dangerous characters
+    text = re.sub(r'[<>"\';\\]', '', text)
     
-    if max_length:
-        sanitized = truncate_string(sanitized, max_length)
+    # Truncate if needed
+    if max_length and len(text) > max_length:
+        text = text[:max_length].strip()
     
-    return sanitized
+    return text
 
-def truncate_string(text: str, max_length: int, suffix: str = '...') -> str:
+def truncate_string(text: str, max_length: int, suffix: str = "...") -> str:
     """
-    Truncate string to maximum length
+    Truncate string with suffix
     
     Args:
         text: Text to truncate
-        max_length: Maximum length
-        suffix: Suffix to add if truncated
+        max_length: Maximum length including suffix
+        suffix: Suffix to add when truncated
         
     Returns:
         Truncated string
     """
-    if len(text) <= max_length:
+    if not text or len(text) <= max_length:
         return text
     
-    return text[:max_length - len(suffix)] + suffix
+    return text[:max_length - len(suffix)].strip() + suffix
 
 # ==================== GENERATION UTILITIES ====================
 
@@ -384,19 +409,19 @@ def generate_session_id() -> str:
     Generate a unique session ID
     
     Returns:
-        UUID string for session ID
+        UUID string for session
     """
     return str(uuid.uuid4())
 
-def generate_unique_id(prefix: str = '') -> str:
+def generate_unique_id(prefix: str = "") -> str:
     """
-    Generate a unique identifier
+    Generate a unique ID with optional prefix
     
     Args:
         prefix: Optional prefix for the ID
         
     Returns:
-        Unique identifier string
+        Unique ID string
     """
     unique_id = str(uuid.uuid4())
     return f"{prefix}{unique_id}" if prefix else unique_id
@@ -407,70 +432,63 @@ def generate_hash(data: str, algorithm: str = 'sha256') -> str:
     
     Args:
         data: Data to hash
-        algorithm: Hash algorithm ('sha256', 'md5', 'sha1')
+        algorithm: Hash algorithm to use
         
     Returns:
-        Hash string
+        Hex digest of hash
     """
-    if algorithm == 'sha256':
-        return hashlib.sha256(data.encode()).hexdigest()
-    elif algorithm == 'md5':
+    if algorithm == 'md5':
         return hashlib.md5(data.encode()).hexdigest()
     elif algorithm == 'sha1':
         return hashlib.sha1(data.encode()).hexdigest()
-    else:
-        raise ValueError(f"Unsupported hash algorithm: {algorithm}")
+    else:  # default sha256
+        return hashlib.sha256(data.encode()).hexdigest()
 
-def generate_timestamp() -> str:
+def generate_timestamp(include_microseconds: bool = False) -> str:
     """
-    Generate current timestamp in ISO format
+    Generate current timestamp string
     
+    Args:
+        include_microseconds: Whether to include microseconds
+        
     Returns:
-        ISO format timestamp string
+        Timestamp string
     """
-    return datetime.utcnow().isoformat()
+    now = datetime.utcnow()
+    if include_microseconds:
+        return now.strftime("%Y-%m-%d %H:%M:%S.%f")
+    else:
+        return now.strftime(DEFAULT_DATETIME_FORMAT)
 
 # ==================== DATA UTILITIES ====================
 
-def safe_get(data: Dict[str, Any], key: str, default: Any = None, transform: Optional[callable] = None) -> Any:
+def safe_get(data: Dict[str, Any], key: str, default: Any = None) -> Any:
     """
-    Safely get value from dictionary with optional transformation
+    Safely get value from dictionary
     
     Args:
         data: Dictionary to get value from
-        key: Key to look for (supports dot notation like 'user.profile.name')
+        key: Key to look for
         default: Default value if key not found
-        transform: Optional transformation function
         
     Returns:
-        Value from dictionary or default
+        Value or default
     """
-    try:
-        value = data
-        for k in key.split('.'):
-            value = value[k]
-        
-        if transform and value is not None:
-            value = transform(value)
-        
-        return value
-    except (KeyError, TypeError, IndexError):
-        return default
+    return data.get(key, default) if isinstance(data, dict) else default
 
-def merge_dicts(*dicts: Dict[str, Any]) -> Dict[str, Any]:
+def merge_dicts(dict1: Dict[str, Any], dict2: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Merge multiple dictionaries
+    Merge two dictionaries
     
     Args:
-        *dicts: Dictionaries to merge
+        dict1: First dictionary
+        dict2: Second dictionary (takes precedence)
         
     Returns:
         Merged dictionary
     """
-    result = {}
-    for d in dicts:
-        if isinstance(d, dict):
-            result.update(d)
+    result = dict1.copy()
+    result.update(dict2)
     return result
 
 def flatten_dict(data: Dict[str, Any], separator: str = '.') -> Dict[str, Any]:
@@ -496,25 +514,39 @@ def flatten_dict(data: Dict[str, Any], separator: str = '.') -> Dict[str, Any]:
     
     return _flatten(data)
 
-def clean_dict(data: Dict[str, Any], remove_none: bool = True, remove_empty: bool = False) -> Dict[str, Any]:
+def clean_dict(data: Dict[str, Any], remove_none: bool = True, remove_empty: bool = True) -> Dict[str, Any]:
     """
     Clean dictionary by removing None/empty values
     
     Args:
         data: Dictionary to clean
-        remove_none: Remove None values
-        remove_empty: Remove empty strings/lists/dicts
+        remove_none: Whether to remove None values
+        remove_empty: Whether to remove empty strings/lists/dicts
         
     Returns:
         Cleaned dictionary
     """
+    if not isinstance(data, dict):
+        return data
+    
     cleaned = {}
-    for k, v in data.items():
-        if remove_none and v is None:
+    for key, value in data.items():
+        # Skip None values if requested
+        if remove_none and value is None:
             continue
-        if remove_empty and v == '' or v == [] or v == {}:
+        
+        # Skip empty values if requested
+        if remove_empty and value in ('', [], {}):
             continue
-        cleaned[k] = v
+        
+        # Recursively clean nested dictionaries
+        if isinstance(value, dict):
+            cleaned_value = clean_dict(value, remove_none, remove_empty)
+            if cleaned_value or not remove_empty:  # Only add if not empty or if we're not removing empty
+                cleaned[key] = cleaned_value
+        else:
+            cleaned[key] = value
+    
     return cleaned
 
 def normalize_text(text: str) -> str:
@@ -527,17 +559,17 @@ def normalize_text(text: str) -> str:
     Returns:
         Normalized text
     """
-    if not isinstance(text, str):
-        text = str(text)
+    if not text or not isinstance(text, str):
+        return ""
     
     # Convert to lowercase
     text = text.lower()
     
     # Remove extra whitespace
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = ' '.join(text.split())
     
-    # Remove special characters but keep basic punctuation
-    text = re.sub(r'[^\w\s\-.,!?]', '', text)
+    # Remove common punctuation
+    text = re.sub(r'[^\w\s]', '', text)
     
     return text
 
@@ -565,6 +597,7 @@ def health_check() -> Dict[str, Any]:
         'module': 'utils',
         'version': __version__,
         'status': 'healthy',
+        'email_validator_available': EMAIL_VALIDATOR_AVAILABLE,
         'components': {}
     }
     
