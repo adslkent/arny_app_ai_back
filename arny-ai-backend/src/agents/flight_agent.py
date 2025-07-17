@@ -749,7 +749,7 @@ Remember: You are a specialized flight search agent. Focus on flight-related que
         """Run agent with retry logic and validation - ENHANCED for NO TIMEOUT LIMITS"""
         
         try:
-            print(f"🔄 Running hotel agent with retry logic...")
+            print(f"🔄 Running agent with retry logic...")
             
             # FIXED: Use Runner.run as static method instead of instantiating Runner
             if isinstance(messages, str):
@@ -777,10 +777,10 @@ Remember: You are a specialized flight search agent. Focus on flight-related que
                 else:
                     validated_result = AgentRunnerResponse(final_output=str(result))
             
-            print(f"✅ Hotel agent execution successful")
+            print(f"✅ Agent execution successful")
             return validated_result
             
         except Exception as e:
-            print(f"❌ Hotel agent execution failed: {e}")
+            print(f"❌ Agent execution failed: {e}")
             # Re-raise for retry logic to catch
             raise e
