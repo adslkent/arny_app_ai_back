@@ -743,23 +743,21 @@ Tomorrow's date: {tomorrow}
 5. **Missing Information**: If critical details are missing, ask for clarification before searching.
 
 Remember: You are a specialized flight search agent. Focus on flight-related queries and use your tools effectively to provide the best flight options for users."""
-
+        
     @openai_agents_sdk_retry
     async def _run_agent_with_retry(self, agent, messages):
         """Run agent with retry logic and validation - ENHANCED for NO TIMEOUT LIMITS"""
         
         try:
-            print(f"🔄 Running agent with retry logic...")
+            print(f"🔄 Running hotel agent with retry logic...")
             
-            # ENHANCED: Use Runner.run_sync for improved reliability
+            # FIXED: Use Runner.run as static method instead of instantiating Runner
             if isinstance(messages, str):
                 # Single message
-                runner = Runner(agent=agent)
-                result = runner.run_sync(content_str=messages)
+                result = await Runner.run(agent, messages)
             else:
                 # Multiple messages (conversation context)
-                runner = Runner(agent=agent)
-                result = runner.run_sync(messages=messages)
+                result = await Runner.run(agent, messages)
             
             # ENHANCED: Validate result and ensure it has the required structure
             if not result:
@@ -779,10 +777,10 @@ Remember: You are a specialized flight search agent. Focus on flight-related que
                 else:
                     validated_result = AgentRunnerResponse(final_output=str(result))
             
-            print(f"✅ Agent execution successful")
+            print(f"✅ Hotel agent execution successful")
             return validated_result
             
         except Exception as e:
-            print(f"❌ Agent execution failed: {e}")
+            print(f"❌ Hotel agent execution failed: {e}")
             # Re-raise for retry logic to catch
             raise e
