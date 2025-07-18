@@ -1,24 +1,34 @@
 """
-User Profile Agent for Arny AI - ENHANCED VERSION WITHOUT TIMEOUTS AND MEMBER LIMITS
+Enhanced User Profile Agent with Group Support and AI Filtering - ENHANCED VERSION
 
-This agent filters search results based on group preferences with optimizations
-to handle larger result sets efficiently. Features:
-- Process up to 50 flight results
-- Process up to 50 hotel results  
-- Return up to 10 filtered results
-- Ultra-short prompts for efficiency
-- NO TIMEOUT LIMITS on AI processing
-- NO LIMITS on group member processing
-- Cache results to prevent duplicate processing
-- ALWAYS APPLY AI FILTERING for both single travelers and groups
+This module provides user profile management and intelligent filtering for travel search results.
+Enhanced with support for larger datasets and always applies AI filtering for both individuals and groups.
+
+Key Features:
+- Support for up to 50 flight/hotel results
+- Always applies AI filtering for both single travelers and groups  
+- Enhanced group profile processing with no member limits
+- Optimized caching for better performance
+- Comprehensive retry strategies for API reliability
+
+Usage example:
+```python
+from user_profile_agent import UserProfileAgent
+
+# Initialize agent
+profile_agent = UserProfileAgent()
+
+# Filter flight results
+result = await profile_agent.filter_flight_results(user_id, flight_results, search_params)
+```
 """
 
 import json
 import logging
 import asyncio
-import requests
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
+import requests
 
 from openai import OpenAI
 from tenacity import (
@@ -32,19 +42,13 @@ from tenacity import (
     before_sleep_log,
     retry_if_exception
 )
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from ..utils.config import config
 from ..database.operations import DatabaseOperations
 
-# Set up logging
+# Configure logging
 logger = logging.getLogger(__name__)
-
-# ==================== PYDANTIC MODELS FOR VALIDATION ====================
-
-class OpenAIResponse(BaseModel):
-    """Pydantic model for OpenAI response validation"""
-    output: Optional[Any] = None
 
 # ==================== OPENAI API RETRY CONDITIONS ====================
 
@@ -69,27 +73,31 @@ def retry_on_openai_http_status_error(result):
     return False
 
 def retry_on_openai_validation_failure(result):
-    """Condition 5: Retry if OpenAI result fails Pydantic validation"""
+    """Condition 5: Retry if validation fails on OpenAI result"""
     try:
-        if result:
-            OpenAIResponse.model_validate(result.__dict__ if hasattr(result, '__dict__') else result)
-        return False
-    except (ValidationError, AttributeError):
+        # Basic validation of expected structure
+        if isinstance(result, dict):
+            if "filtered_results" in result and "total_results" in result:
+                return False  # Valid structure
+            elif result.get("error"):
+                return True  # Error result, should retry
+        return False  # Accept other formats
+    except Exception as e:
+        logger.warning(f"Unexpected validation error: {e}")
         return True
+    return False
 
 def retry_on_openai_api_exception(exception):
-    """Condition 4: Custom exception checker for OpenAI API calls"""
-    exception_str = str(exception).lower()
-    return any(keyword in exception_str for keyword in [
-        'timeout', 'failed', 'unavailable', 'rate limit', 'api error',
-        'connection', 'network', 'server error'
-    ])
+    """Custom exception checker for OpenAI-specific exceptions"""
+    return "openai" in str(type(exception)).lower() or "api" in str(exception).lower()
 
-# OpenAI API retry decorator with all 5 conditions
+# ==================== COMBINED RETRY STRATEGIES ====================
+
+# Primary retry strategy for critical OpenAI API operations
 openai_api_retry = retry(
     retry=retry_any(
         # Condition 3: Exception message matching
-        retry_if_exception_message(match=r".*(timeout|failed|unavailable|rate.limit|api.error|connection|network|server.error).*"),
+        retry_if_exception_message(match=r".*(timeout|failed|unavailable|network|connection|api.?error|rate.?limit).*"),
         # Condition 4: Exception types and custom checkers
         retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
         retry_if_exception(retry_on_openai_api_exception),
@@ -302,29 +310,34 @@ class UserProfileAgent:
                     return [profile_dict]
                 return []
             
-            # Use first group only
-            primary_group = user_groups[0]
+            # Process all group members - NO LIMITS
+            all_profiles = []
+            for group in user_groups:
+                try:
+                    group_members = await self.db.get_group_members(group.group_code)
+                    print(f"📊 Processing group {group.group_code} with {len(group_members)} members - NO MEMBER LIMITS")
+                    
+                    for member in group_members:
+                        try:
+                            member_profile = await self.db.get_user_profile(member.user_id)
+                            if member_profile:
+                                profile_dict = member_profile.dict()
+                                profile_dict["group_role"] = member.role
+                                profile_dict["group_code"] = group.group_code
+                                all_profiles.append(profile_dict)
+                        except Exception as e:
+                            logger.warning(f"Failed to get profile for member {member.user_id}: {e}")
+                            continue
+                except Exception as e:
+                    logger.warning(f"Failed to get members for group {group.group_code}: {e}")
+                    continue
             
-            # Get group members
-            group_members = await self.db.get_group_members(primary_group)
-            
-            # CHANGED: Get profiles for ALL members (removed limit of 5)
-            group_profiles = []
-            for member in group_members:  # CHANGED: Process ALL members, no [:5] limit
-                profile = await self.db.get_user_profile(member.user_id)
-                if profile:
-                    profile_dict = profile.dict()
-                    profile_dict["group_role"] = member.role
-                    group_profiles.append(profile_dict)
-            
-            logger.info(f"Found {len(group_profiles)} profiles in group (ALL members processed)")
-            print(f"📊 Processing ALL {len(group_profiles)} group members (no member limits)")
-            return group_profiles
+            return all_profiles
             
         except Exception as e:
             logger.error(f"Error getting group profiles: {e}")
             return []
-    
+
     def _extract_enhanced_flight_data(self, flights: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """ENHANCED: Extract flight data for up to 50 flights efficiently"""
         enhanced_flights = []
@@ -339,20 +352,27 @@ class UserProfileAgent:
                     "id": i + 1,
                     "price": price.get("total", "N/A"),
                     "currency": price.get("currency", ""),
+                    "duration": "",
+                    "stops": 0,
+                    "departure_time": "",
+                    "arrival_time": "",
+                    "airline": "",
                 }
                 
-                if itineraries:
+                if itineraries and len(itineraries) > 0:
                     first_itinerary = itineraries[0]
                     segments = first_itinerary.get("segments", [])
                     
                     if segments:
                         first_segment = segments[0]
+                        last_segment = segments[-1]
+                        
                         enhanced_flight.update({
                             "departure_time": first_segment.get("departure", {}).get("at", ""),
-                            "arrival_time": segments[-1].get("arrival", {}).get("at", "") if segments else "",
+                            "arrival_time": last_segment.get("arrival", {}).get("at", ""),
                             "airline": first_segment.get("carrierCode", ""),
                             "duration": first_itinerary.get("duration", ""),
-                            "stops": len(segments) - 1
+                            "stops": max(0, len(segments) - 1)
                         })
                 
                 enhanced_flights.append(enhanced_flight)
@@ -420,10 +440,20 @@ Return top 10 flights as JSON: {{"recommended_flights": [{{"id": 1}}, {{"id": 2}
 Flights: {json.dumps(enhanced_flights[:20])}...and {max(0, len(enhanced_flights)-20)} more"""
 
             # Make optimized OpenAI call - NO TIMEOUT LIMITS
-            response = self.openai_client.responses.create(
-                model="o4-mini",
-                input=prompt
-            )
+            try:
+                response = self.openai_client.responses.create(
+                    model="o4-mini",
+                    input=prompt
+                )
+            except Exception as api_error:
+                print(f"⚠️ OpenAI API error: {api_error}")
+                # Return fallback result
+                return {
+                    "filtered_results": original_flights[:10],
+                    "total_results": len(enhanced_flights),
+                    "filtering_applied": False,
+                    "reasoning": f"AI filtering unavailable: {str(api_error)}"
+                }
             
             response_text = ""
             if response and hasattr(response, 'output') and response.output:
@@ -436,6 +466,16 @@ Flights: {json.dumps(enhanced_flights[:20])}...and {max(0, len(enhanced_flights)
                         if response_text:
                             break
             
+            # Check if response is empty
+            if not response_text:
+                print(f"⚠️ Empty response from OpenAI API")
+                return {
+                    "filtered_results": original_flights[:10],
+                    "total_results": len(enhanced_flights),
+                    "filtering_applied": False,
+                    "reasoning": "AI filtering returned empty response"
+                }
+
             # Enhanced JSON parsing
             try:
                 json_start = response_text.find('{')
@@ -447,16 +487,16 @@ Flights: {json.dumps(enhanced_flights[:20])}...and {max(0, len(enhanced_flights)
                     
                     # Map back to original flights (up to 10)
                     recommended_ids = [f.get("id", 0) for f in filtered_result.get("recommended_flights", [])]
-                    original_flights_filtered = [original_flights[i-1] for i in recommended_ids if 1 <= i <= len(original_flights)]
+                    original_flights_mapped = [original_flights[i-1] for i in recommended_ids if 1 <= i <= len(original_flights)]
                     
                     # Ensure we return up to 10 results
-                    if len(original_flights_filtered) > 10:
-                        original_flights_filtered = original_flights_filtered[:10]
+                    if len(original_flights_mapped) > 10:
+                        original_flights_mapped = original_flights_mapped[:10]
                     
-                    print(f"✅ AI filtered to {len(original_flights_filtered)} flights")
+                    print(f"✅ AI filtered to {len(original_flights_mapped)} flights")
                     
                     return {
-                        "filtered_results": original_flights_filtered,
+                        "filtered_results": original_flights_mapped,
                         "total_results": len(enhanced_flights),
                         "filtering_applied": True,
                         "reasoning": filtered_result.get("filtering_rationale", "AI filtering applied based on traveler profile")
@@ -505,10 +545,20 @@ Return top 10 hotels as JSON: {{"recommended_hotels": [{{"id": 1}}, {{"id": 2}},
 Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20)} more"""
 
             # Make optimized OpenAI call - NO TIMEOUT LIMITS
-            response = self.openai_client.responses.create(
-                model="o4-mini",
-                input=prompt
-            )
+            try:
+                response = self.openai_client.responses.create(
+                    model="o4-mini",
+                    input=prompt
+                )
+            except Exception as api_error:
+                print(f"⚠️ OpenAI API error: {api_error}")
+                # Return fallback result
+                return {
+                    "filtered_results": hotel_results[:10],
+                    "total_results": len(enhanced_hotels),
+                    "filtering_applied": False,
+                    "reasoning": f"AI filtering unavailable: {str(api_error)}"
+                }
             
             response_text = ""
             if response and hasattr(response, 'output') and response.output:
@@ -521,6 +571,16 @@ Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20
                         if response_text:
                             break
             
+            # Check if response is empty
+            if not response_text:
+                print(f"⚠️ Empty response from OpenAI API")
+                return {
+                    "filtered_results": hotel_results[:10],
+                    "total_results": len(enhanced_hotels),
+                    "filtering_applied": False,
+                    "reasoning": "AI filtering returned empty response"
+                }
+
             # Enhanced JSON parsing
             try:
                 json_start = response_text.find('{')
@@ -558,7 +618,7 @@ Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20
                 "filtering_applied": False,
                 "reasoning": "AI filtering failed, showing top options"
             }
-            
+           
         except Exception as e:
             logger.error(f"Error in AI hotel filtering: {e}")
             print(f"❌ AI filtering error: {e}")
@@ -616,66 +676,69 @@ Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20
                     except:
                         pass
                 
-                return "; ".join(summary_parts)
+                return ", ".join(summary_parts)
             
-            # For groups, use the existing group logic
-            travel_styles = []
-            ages = []
-            cities = []
-            
-            for profile in group_profiles:
-                if profile.get("travel_style"):
-                    travel_styles.append(profile["travel_style"])
+            else:
+                # Group travel summary
+                summary_parts = [f"{len(group_profiles)} group travelers"]
                 
-                if profile.get("city"):
-                    cities.append(profile["city"])
+                # Collect group preferences
+                styles = [p.get("travel_style") for p in group_profiles if p.get("travel_style")]
+                cities = [p.get("city") for p in group_profiles if p.get("city")]
                 
-                # Calculate approximate age from birthdate
-                if profile.get("birthdate"):
-                    try:
-                        from datetime import date
-                        birth_year = int(profile["birthdate"][:4])
-                        current_year = date.today().year
-                        age = current_year - birth_year
-                        if 0 < age < 120:  # Reasonable age range
-                            ages.append(age)
-                    except:
-                        pass
-            
-            # Create group summary
-            summary_parts = [f"{len(group_profiles)} members"]
-            
-            if travel_styles:
-                unique_styles = list(set(travel_styles))
-                summary_parts.append(f"styles: {', '.join(unique_styles)}")
-            
-            if ages:
-                avg_age = sum(ages) // len(ages)
-                summary_parts.append(f"avg age: {avg_age}")
-            
-            if cities:
-                unique_cities = list(set(cities))
-                if len(unique_cities) <= 3:
-                    summary_parts.append(f"from: {', '.join(unique_cities)}")
-                else:
-                    summary_parts.append(f"from {len(unique_cities)} cities")
-            
-            return "; ".join(summary_parts)
-            
+                if styles:
+                    unique_styles = list(set(styles[:3]))  # Up to 3 unique styles
+                    summary_parts.append(f"styles: {unique_styles}")
+                
+                if cities:
+                    unique_cities = list(set(cities[:2]))  # Up to 2 unique cities
+                    summary_parts.append(f"from: {unique_cities}")
+                
+                # Group age range
+                ages = []
+                for profile in group_profiles:
+                    if profile.get("birthdate"):
+                        try:
+                            from datetime import date
+                            birth_year = int(profile["birthdate"][:4])
+                            current_year = date.today().year
+                            age = current_year - birth_year
+                            if 0 < age < 120:
+                                ages.append(age)
+                        except:
+                            pass
+                
+                if ages:
+                    summary_parts.append(f"ages: {min(ages)}-{max(ages)}")
+                
+                return ", ".join(summary_parts)
+                
         except Exception as e:
-            logger.error(f"Error creating profile summary: {e}")
-            return f"{len(group_profiles)} traveler(s)" if group_profiles else "unknown traveler profile"
+            logger.warning(f"Error creating profile summary: {e}")
+            return f"{len(group_profiles)} travelers" if group_profiles else "unknown travelers"
     
     def _cleanup_cache(self):
-        """Keep cache size manageable"""
-        if len(self._filter_cache) > 15:  # Increased cache size for larger group datasets
-            # Remove oldest entries
-            keys_to_remove = list(self._filter_cache.keys())[:-15]
-            for key in keys_to_remove:
-                del self._filter_cache[key]
+        """Clean up old cache entries to prevent memory bloat"""
+        try:
+            if len(self._filter_cache) > 100:  # Keep cache under 100 entries
+                # Remove oldest entries (simple FIFO cleanup)
+                keys_to_remove = list(self._filter_cache.keys())[:-50]  # Keep last 50
+                for key in keys_to_remove:
+                    del self._filter_cache[key]
+                print(f"🧹 Cache cleanup: removed {len(keys_to_remove)} old entries")
+        except Exception as e:
+            logger.warning(f"Cache cleanup failed: {e}")
 
-# ==================== MODULE EXPORTS ====================
+    # ==================== LEGACY METHODS FOR BACKWARD COMPATIBILITY ====================
 
-__all__ = [
-    'UserProfileAgent'
-]
+    async def filter_flights_enhanced(self, flights: List[Dict[str, Any]], 
+                                    user_profile: Dict[str, Any]) -> Dict[str, Any]:
+        """Legacy method - redirects to new enhanced filtering"""
+        user_id = user_profile.get("user_id", "unknown")
+        return await self.filter_flight_results(user_id, flights, {})
+
+    async def filter_hotels_enhanced(self, hotels: List[Dict[str, Any]], 
+                                   user_profile: Dict[str, Any]) -> Dict[str, Any]:
+        """Legacy method - redirects to new enhanced filtering"""
+        user_id = user_profile.get("user_id", "unknown")
+        return await self.filter_hotel_results(user_id, hotels, {})
