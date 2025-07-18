@@ -247,13 +247,15 @@ class AmadeusService:
             error_msg = f"Amadeus flight search API error: {str(e)}"
             logger.error(error_msg)
             
-            # Extract status code for retry decision
-            status_code = getattr(e, 'response', {}).get('status', 'unknown')
+            # Properly extract status code from Response object
+            status_code = 'unknown'
+            if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                status_code = str(e.response.status_code)
             
             result = {
                 "success": False,
                 "error": error_msg,
-                "error_code": str(status_code),
+                "error_code": status_code,
                 "results": []
             }
             
@@ -317,10 +319,15 @@ class AmadeusService:
             error_msg = f"Amadeus flight pricing API error: {str(e)}"
             logger.error(error_msg)
             
+            # Properly extract status code from Response object
+            status_code = 'unknown'
+            if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                status_code = str(e.response.status_code)
+            
             return {
                 "success": False,
                 "error": error_msg,
-                "error_code": getattr(e, 'response', {}).get('status', 'unknown')
+                "error_code": status_code
             }
             
         except Exception as e:
@@ -349,7 +356,8 @@ class AmadeusService:
             if not hasattr(hotels_response, 'data') or not hotels_response.data:
                 return {
                     "success": False,
-                    "error": f"No hotels found for city code: {city_code}"
+                    "error": f"No hotels found for city code: {city_code}",
+                    "results": []
                 }
             
             # Extract hotel IDs (limit to max_results for offers search)
@@ -403,10 +411,15 @@ class AmadeusService:
             error_msg = f"Amadeus hotel search API error: {str(e)}"
             logger.error(error_msg)
             
+            # Properly extract status code from Response object
+            status_code = 'unknown'
+            if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                status_code = str(e.response.status_code)
+            
             return {
                 "success": False,
                 "error": error_msg,
-                "error_code": getattr(e, 'response', {}).get('status', 'unknown'),
+                "error_code": status_code,
                 "results": []
             }
             
@@ -468,10 +481,15 @@ class AmadeusService:
             error_msg = f"Amadeus hotel offers API error: {str(e)}"
             logger.error(error_msg)
             
+            # Properly extract status code from Response object
+            status_code = 'unknown'
+            if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                status_code = str(e.response.status_code)
+            
             return {
                 "success": False,
                 "error": error_msg,
-                "error_code": getattr(e, 'response', {}).get('status', 'unknown')
+                "error_code": status_code
             }
             
         except Exception as e:
