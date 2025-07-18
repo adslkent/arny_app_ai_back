@@ -150,41 +150,127 @@ amadeus_secondary_retry = retry(
     retry=retry_any(
         retry_if_exception_message(match=r".*(timeout|failed|unavailable|network|connection|429|502|503|504).*"),
         retry_if_exception_type((ResponseError, requests.exceptions.RequestException, ConnectionError, TimeoutError)),
-        retry_if_exception(retry_on_amadeus_exception_type),
         retry_if_result(retry_on_amadeus_error_result),
         retry_if_result(retry_on_amadeus_http_status)
     ),
-    stop=stop_after_attempt(3),  # Fewer attempts for secondary operations
-    wait=wait_exponential(multiplier=1, min=1, max=10),
+    stop=stop_after_attempt(2),  # Fewer attempts for secondary operations
+    wait=wait_exponential(multiplier=1, min=0.5, max=5),  # Shorter wait times
     before_sleep=before_sleep_log(logger, logging.WARNING)
 )
 
+# ==================== AMADEUS SERVICE CLASS ====================
+
 class AmadeusService:
-    """Service for interacting with Amadeus APIs with comprehensive retry strategies"""
+    """
+    Enhanced Amadeus API service with comprehensive retry strategies
+    
+    Implements robust error handling and retry mechanisms for all Amadeus API operations
+    following comprehensive retry strategy principles.
+    """
     
     def __init__(self):
+        """Initialize Amadeus client with credentials"""
+        self.client = Client(
+            client_id=config.AMADEUS_CLIENT_ID,
+            client_secret=config.AMADEUS_CLIENT_SECRET,
+            hostname='test'  # Use 'production' when ready for production
+        )
+        logger.info("🔧 AmadeusService initialized with retry strategies")
+    
+    # ==================== HELPER METHODS ====================
+    
+    def _format_flight_offer(self, offer: Dict[str, Any]) -> Dict[str, Any]:
+        """Format flight offer for consistent response structure"""
         try:
-            self.client = Client(
-                client_id=config.AMADEUS_API_KEY,
-                client_secret=config.AMADEUS_API_SECRET,
-                hostname=config.AMADEUS_BASE_URL
-            )
-            self.logger = logging.getLogger(__name__)
-            logger.info("AmadeusService initialized with enhanced retry strategies")
+            formatted_offer = {
+                "id": offer.get("id"),
+                "type": offer.get("type"),
+                "source": offer.get("source"),
+                "instantTicketingRequired": offer.get("instantTicketingRequired"),
+                "nonHomogeneous": offer.get("nonHomogeneous"),
+                "oneWay": offer.get("oneWay"),
+                "lastTicketingDate": offer.get("lastTicketingDate"),
+                "numberOfBookableSeats": offer.get("numberOfBookableSeats"),
+                "price": offer.get("price", {}),
+                "pricingOptions": offer.get("pricingOptions", {}),
+                "validatingAirlineCodes": offer.get("validatingAirlineCodes", []),
+                "travelerPricings": offer.get("travelerPricings", []),
+                "itineraries": []
+            }
+            
+            # Format itineraries
+            for itinerary in offer.get("itineraries", []):
+                formatted_itinerary = {
+                    "duration": itinerary.get("duration"),
+                    "segments": []
+                }
+                
+                for segment in itinerary.get("segments", []):
+                    formatted_segment = {
+                        "departure": segment.get("departure", {}),
+                        "arrival": segment.get("arrival", {}),
+                        "carrierCode": segment.get("carrierCode"),
+                        "number": segment.get("number"),
+                        "aircraft": segment.get("aircraft", {}),
+                        "operating": segment.get("operating", {}),
+                        "duration": segment.get("duration"),
+                        "id": segment.get("id"),
+                        "numberOfStops": segment.get("numberOfStops", 0),
+                        "blacklistedInEU": segment.get("blacklistedInEU", False)
+                    }
+                    formatted_itinerary["segments"].append(formatted_segment)
+                
+                formatted_offer["itineraries"].append(formatted_itinerary)
+            
+            return formatted_offer
+            
         except Exception as e:
-            logger.error(f"Failed to initialize AmadeusService: {e}")
-            raise
+            logger.warning(f"Error formatting flight offer: {e}")
+            return offer  # Return original if formatting fails
+    
+    def _format_hotel_offer(self, hotel_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Format hotel offer for consistent response structure"""
+        try:
+            formatted_hotel = {
+                "type": hotel_data.get("type"),
+                "hotel": hotel_data.get("hotel", {}),
+                "available": hotel_data.get("available"),
+                "offers": [],
+                "self": hotel_data.get("self")
+            }
+            
+            # Format offers
+            for offer in hotel_data.get("offers", []):
+                formatted_offer = {
+                    "id": offer.get("id"),
+                    "checkInDate": offer.get("checkInDate"),
+                    "checkOutDate": offer.get("checkOutDate"),
+                    "rateCode": offer.get("rateCode"),
+                    "rateFamilyEstimated": offer.get("rateFamilyEstimated", {}),
+                    "room": offer.get("room", {}),
+                    "guests": offer.get("guests", {}),
+                    "price": offer.get("price", {}),
+                    "policies": offer.get("policies", {}),
+                    "self": offer.get("self")
+                }
+                formatted_hotel["offers"].append(formatted_offer)
+            
+            return formatted_hotel
+            
+        except Exception as e:
+            logger.warning(f"Error formatting hotel offer: {e}")
+            return hotel_data  # Return original if formatting fails
     
     # ==================== FLIGHT OPERATIONS WITH RETRY STRATEGIES ====================
     
     @amadeus_critical_retry
-    async def search_flights(self, origin: str, destination: str, departure_date: str, 
+    async def search_flights(self, origin: str, destination: str, departure_date: str,
                            return_date: Optional[str] = None, adults: int = 1, 
                            cabin_class: str = "ECONOMY", max_results: int = 50) -> Dict[str, Any]:
         """
         Search for flights using Amadeus Flight Offers Search API with comprehensive retry strategies
         
-        Enhanced with 5-condition retry strategy:
+        Implements all 5 retry strategy conditions:
         1. HTTP status checking
         2. Error/warning field inspection  
         3. Exception message matching
@@ -247,15 +333,13 @@ class AmadeusService:
             error_msg = f"Amadeus flight search API error: {str(e)}"
             logger.error(error_msg)
             
-            # Properly extract status code from Response object
-            status_code = 'unknown'
-            if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
-                status_code = str(e.response.status_code)
+            # Extract status code for retry decision
+            status_code = getattr(e, 'response', {}).get('status', 'unknown')
             
             result = {
                 "success": False,
                 "error": error_msg,
-                "error_code": status_code,
+                "error_code": str(status_code),
                 "results": []
             }
             
@@ -514,154 +598,128 @@ class AmadeusService:
                 subType=subtype
             )
             
+            airports = []
             if hasattr(response, 'data') and response.data:
-                logger.info(f"Airport search successful: {len(response.data)} results")
-                return response.data
-            else:
-                logger.info(f"No airports found for keyword: {keyword}")
-                return []
+                for location in response.data:
+                    airport_info = {
+                        "iataCode": location.get("iataCode"),
+                        "name": location.get("name"),
+                        "address": location.get("address", {}),
+                        "geoCode": location.get("geoCode", {}),
+                        "timeZoneOffset": location.get("timeZoneOffset"),
+                        "subType": location.get("subType")
+                    }
+                    airports.append(airport_info)
                 
+                logger.info(f"Found {len(airports)} airports for '{keyword}'")
+            
+            return airports
+            
         except ResponseError as e:
-            logger.error(f"Amadeus airport search API error: {e}")
+            logger.error(f"Amadeus airport search API error: {str(e)}")
             return []
+            
         except Exception as e:
-            logger.error(f"Unexpected airport search error: {e}")
+            logger.error(f"Unexpected airport search error: {str(e)}")
             return []
 
     @amadeus_secondary_retry
-    async def get_flight_checkin_links(self, airline_code: str) -> List[Dict[str, Any]]:
+    async def get_flight_status(self, flight_number: str, scheduled_departure_date: str) -> Dict[str, Any]:
         """
-        Get flight check-in links for an airline with retry strategies
+        Get real-time flight status with retry strategies
         """
         try:
-            logger.info(f"Getting check-in links for airline {airline_code} with retry strategies")
+            logger.info(f"Getting flight status for {flight_number} on {scheduled_departure_date}")
+            
+            response = self.client.schedule.flights.get(
+                carrierCode=flight_number[:2],  # First 2 characters are airline code
+                flightNumber=flight_number[2:],  # Rest is flight number
+                scheduledDepartureDate=scheduled_departure_date
+            )
+            
+            if hasattr(response, 'data') and response.data:
+                flight_status = response.data[0]  # Get first result
+                
+                status_info = {
+                    "flight_number": flight_number,
+                    "scheduled_departure": flight_status.get("flightDesignator", {}).get("scheduledDepartureDate"),
+                    "actual_departure": flight_status.get("flightDesignator", {}).get("actualDepartureDate"),
+                    "scheduled_arrival": flight_status.get("flightDesignator", {}).get("scheduledArrivalDate"),
+                    "actual_arrival": flight_status.get("flightDesignator", {}).get("actualArrivalDate"),
+                    "status": flight_status.get("flightStatusType"),
+                    "departure_terminal": flight_status.get("flightPoints", [{}])[0].get("departure", {}).get("terminal"),
+                    "arrival_terminal": flight_status.get("flightPoints", [{}])[0].get("arrival", {}).get("terminal"),
+                    "gate": flight_status.get("flightPoints", [{}])[0].get("departure", {}).get("gate")
+                }
+                
+                logger.info(f"Flight status retrieved: {status_info.get('status')}")
+                return {
+                    "success": True,
+                    "flight_status": status_info
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "No flight status found"
+                }
+                
+        except ResponseError as e:
+            logger.error(f"Amadeus flight status API error: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Flight status API error: {str(e)}"
+            }
+            
+        except Exception as e:
+            logger.error(f"Unexpected flight status error: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Unexpected error: {str(e)}"
+            }
+
+    @amadeus_secondary_retry
+    async def get_airline_check_in_links(self, airline_code: str) -> Dict[str, Any]:
+        """
+        Get airline check-in links with retry strategies
+        """
+        try:
+            logger.info(f"Getting check-in links for airline: {airline_code}")
             
             response = self.client.reference_data.urls.checkin_links.get(
                 airlineCode=airline_code
             )
             
             if hasattr(response, 'data') and response.data:
-                logger.info(f"Check-in links retrieved: {len(response.data)} links")
-                return response.data
+                checkin_info = response.data[0]
+                
+                links_info = {
+                    "airline_code": airline_code,
+                    "airline_name": checkin_info.get("type"),
+                    "checkin_url": checkin_info.get("href"),
+                    "channels": checkin_info.get("channel", [])
+                }
+                
+                logger.info(f"Check-in links retrieved for {airline_code}")
+                return {
+                    "success": True,
+                    "checkin_links": links_info
+                }
             else:
-                logger.info(f"No check-in links found for airline: {airline_code}")
-                return []
+                return {
+                    "success": False,
+                    "error": "No check-in links found"
+                }
                 
         except ResponseError as e:
-            logger.error(f"Amadeus check-in links API error: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"Unexpected check-in links error: {e}")
-            return []
-
-    # ==================== HELPER METHODS (UNCHANGED) ====================
-
-    def _format_flight_offer(self, offer: Dict[str, Any]) -> Dict[str, Any]:
-        """Format flight offer data for consistent response structure (unchanged)"""
-        try:
-            # Extract key information from the offer
-            price = offer.get('price', {})
-            itineraries = offer.get('itineraries', [])
-            
-            formatted_offer = {
-                "id": offer.get('id'),
-                "type": offer.get('type'),
-                "source": offer.get('source'),
-                "instantTicketingRequired": offer.get('instantTicketingRequired', False),
-                "nonHomogeneous": offer.get('nonHomogeneous', False),
-                "oneWay": offer.get('oneWay', False),
-                "lastTicketingDate": offer.get('lastTicketingDate'),
-                "numberOfBookableSeats": offer.get('numberOfBookableSeats'),
-                "price": {
-                    "currency": price.get('currency'),
-                    "total": price.get('total'),
-                    "base": price.get('base'),
-                    "fees": price.get('fees', []),
-                    "grandTotal": price.get('grandTotal')
-                },
-                "pricingOptions": offer.get('pricingOptions', {}),
-                "validatingAirlineCodes": offer.get('validatingAirlineCodes', []),
-                "travelerPricings": offer.get('travelerPricings', []),
-                "itineraries": []
+            logger.error(f"Amadeus check-in links API error: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Check-in links API error: {str(e)}"
             }
             
-            # Format itineraries
-            for itinerary in itineraries:
-                formatted_itinerary = {
-                    "duration": itinerary.get('duration'),
-                    "segments": []
-                }
-                
-                for segment in itinerary.get('segments', []):
-                    formatted_segment = {
-                        "departure": segment.get('departure', {}),
-                        "arrival": segment.get('arrival', {}),
-                        "carrierCode": segment.get('carrierCode'),
-                        "number": segment.get('number'),
-                        "aircraft": segment.get('aircraft', {}),
-                        "operating": segment.get('operating', {}),
-                        "duration": segment.get('duration'),
-                        "id": segment.get('id'),
-                        "numberOfStops": segment.get('numberOfStops', 0),
-                        "blacklistedInEU": segment.get('blacklistedInEU', False)
-                    }
-                    formatted_itinerary["segments"].append(formatted_segment)
-                
-                formatted_offer["itineraries"].append(formatted_itinerary)
-            
-            return formatted_offer
-            
         except Exception as e:
-            logger.error(f"Error formatting flight offer: {e}")
-            return offer  # Return original if formatting fails
-
-    def _format_hotel_offer(self, hotel_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Format hotel offer data for consistent response structure (unchanged)"""
-        try:
-            hotel = hotel_data.get('hotel', {})
-            offers = hotel_data.get('offers', [])
-            
-            formatted_hotel = {
-                "type": hotel_data.get('type'),
-                "hotel": {
-                    "chainCode": hotel.get('chainCode'),
-                    "iataCode": hotel.get('iataCode'),
-                    "dupeId": hotel.get('dupeId'),
-                    "name": hotel.get('name'),
-                    "hotelId": hotel.get('hotelId'),
-                    "geoCode": hotel.get('geoCode', {}),
-                    "address": hotel.get('address', {}),
-                    "contact": hotel.get('contact', {}),
-                    "amenities": hotel.get('amenities', []),
-                    "rating": hotel.get('rating'),
-                    "description": hotel.get('description', {})
-                },
-                "available": hotel_data.get('available', True),
-                "offers": []
+            logger.error(f"Unexpected check-in links error: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Unexpected error: {str(e)}"
             }
-            
-            # Format offers
-            for offer in offers:
-                formatted_offer = {
-                    "id": offer.get('id'),
-                    "checkInDate": offer.get('checkInDate'),
-                    "checkOutDate": offer.get('checkOutDate'),
-                    "rateCode": offer.get('rateCode'),
-                    "rateFamilyEstimated": offer.get('rateFamilyEstimated', {}),
-                    "category": offer.get('category'),
-                    "description": offer.get('description', {}),
-                    "commission": offer.get('commission', {}),
-                    "boardType": offer.get('boardType'),
-                    "room": offer.get('room', {}),
-                    "guests": offer.get('guests', {}),
-                    "price": offer.get('price', {}),
-                    "policies": offer.get('policies', {}),
-                    "self": offer.get('self')
-                }
-                formatted_hotel["offers"].append(formatted_offer)
-            
-            return formatted_hotel
-            
-        except Exception as e:
-            logger.error(f"Error formatting hotel offer: {e}")
-            return hotel_data  # Return original if formatting fails
