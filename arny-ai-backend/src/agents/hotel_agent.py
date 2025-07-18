@@ -79,28 +79,29 @@ def retry_on_openai_http_status_error(result):
     return False
 
 def retry_on_openai_validation_failure(result):
-    """Condition 5: Retry on validation failures"""
-    return result is None or (isinstance(result, str) and len(result.strip()) == 0)
+    """Condition 5: Retry if validation fails on OpenAI result"""
+    try:
+        if isinstance(result, dict) and result.get("final_output"):
+            AgentRunnerResponse(**result)
+        return False  # Validation passed
+    except ValidationError:
+        return True  # Validation failed, retry
+    except Exception as e:
+        logger.warning(f"Unexpected validation error: {e}")
+        return True
+    return False
 
 def retry_on_openai_api_exception(exception):
-    """Condition 3: Check if exception is related to OpenAI API timeouts or rate limits"""
-    exception_str = str(exception).lower()
-    return (
-        "timeout" in exception_str or
-        "rate limit" in exception_str or
-        "429" in exception_str or
-        "502" in exception_str or
-        "503" in exception_str or
-        "504" in exception_str
-    )
+    """Custom exception checker for OpenAI-specific exceptions"""
+    return "openai" in str(type(exception)).lower() or "api" in str(exception).lower()
 
-# ==================== RETRY DECORATORS ====================
+# ==================== COMBINED RETRY STRATEGIES ====================
 
+# Primary retry strategy for critical OpenAI Agents SDK operations
 openai_api_retry = retry(
-    reraise=True,
     retry=retry_any(
-        # Condition 3: OpenAI API exceptions (timeouts, rate limits, server errors)
-        retry_if_exception_message(match=r"(?i).*(timeout|rate.limit|429|502|503|504).*"),
+        # Condition 3: Exception message matching
+        retry_if_exception_message(match=r".*(timeout|failed|unavailable|network|connection|api.?error|rate.?limit).*"),
         # Condition 4: Exception types and custom checkers
         retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
         retry_if_exception(retry_on_openai_api_exception),
@@ -116,148 +117,71 @@ openai_api_retry = retry(
     before_sleep=before_sleep_log(logger, logging.WARNING)
 )
 
-# ==================== CITY CODE MAPPING ====================
-
+# ===== City Code Mapping for Hotels =====
 CITY_CODE_MAPPING = {
-    # Major US cities
+    # Major cities to city codes for Amadeus Hotel API
     "new york": "NYC",
-    "new york city": "NYC",
-    "nyc": "NYC",
-    "los angeles": "LAX",
-    "chicago": "CHI",
+    "los angeles": "LAX", 
     "san francisco": "SFO",
-    "miami": "MIA",
-    "boston": "BOS",
+    "chicago": "CHI",
     "washington": "WAS",
     "washington dc": "WAS",
-    "seattle": "SEA",
+    "boston": "BOS",
+    "miami": "MIA",
     "las vegas": "LAS",
-    "orlando": "ORL",
-    "atlanta": "ATL",
+    "seattle": "SEA",
     "denver": "DEN",
-    "philadelphia": "PHL",
-    "phoenix": "PHX",
-    "houston": "HOU",
-    "dallas": "DFW",
-    "detroit": "DTT",
-    "minneapolis": "MSP",
-    "san diego": "SAN",
-    "tampa": "TPA",
-    "portland": "PDX",
-    "baltimore": "BWI",
-    "nashville": "BNA",
-    "austin": "AUS",
-    "cleveland": "CLE",
-    "pittsburgh": "PIT",
-    "cincinnati": "CVG",
-    "kansas city": "MCI",
-    "st louis": "STL",
-    "salt lake city": "SLC",
-    "sacramento": "SMF",
-    "san jose": "SJC",
-    "memphis": "MEM",
-    "new orleans": "MSY",
-    "milwaukee": "MKE",
-    "columbus": "CMH",
-    "indianapolis": "IND",
-    "jacksonville": "JAX",
-    "charlotte": "CLT",
-    "richmond": "RIC",
-    "norfolk": "ORF",
-    "raleigh": "RDU",
-    "buffalo": "BUF",
-    "albany": "ALB",
-    "rochester": "ROC",
-    "syracuse": "SYR",
-    "hartford": "BDL",
-    "providence": "PVD",
-    "manchester": "MHT",
+    "atlanta": "ATL",
     
-    # International major cities
+    # International cities
     "london": "LON",
     "paris": "PAR",
     "tokyo": "TYO",
-    "beijing": "PEK",
-    "shanghai": "SHA",
-    "hong kong": "HKG",
-    "singapore": "SIN",
-    "bangkok": "BKK",
     "sydney": "SYD",
     "melbourne": "MEL",
+    "brisbane": "BNE",
+    "perth": "PER",
+    "adelaide": "ADL",
+    "canberra": "CBR",
     "dubai": "DXB",
-    "berlin": "BER",
-    "frankfurt": "FRA",
-    "amsterdam": "AMS",
     "rome": "ROM",
     "madrid": "MAD",
     "barcelona": "BCN",
-    "moscow": "MOW",
-    "toronto": "YTO",
-    "vancouver": "YVR",
-    "montreal": "YMQ",
-    "milan": "MIL",
-    "vienna": "VIE",
-    "zurich": "ZUR",
-    "geneva": "GVA",
-    "brussels": "BRU",
-    "seoul": "SEL",
-    "taipei": "TPE",
-    "osaka": "OSA",
-    "auckland": "AKL",
+    "amsterdam": "AMS",
+    "berlin": "BER",
+    "singapore": "SIN",
+    "hong kong": "HKG",
+    "bangkok": "BKK",
     "mumbai": "BOM",
     "delhi": "DEL",
-    "new delhi": "DEL",
-    "kuala lumpur": "KUL",
-    "manila": "MNL",
-    "jakarta": "JKT",
-    "cairo": "CAI",
-    "istanbul": "IST",
-    "athens": "ATH",
-    "munich": "MUC",
-    "copenhagen": "CPH",
-    "stockholm": "STO",
-    "oslo": "OSL",
-    "helsinki": "HEL",
-    "lisbon": "LIS",
-    "dublin": "DUB",
-    "sao paulo": "SAO",
-    "rio de janeiro": "RIO",
-    "buenos aires": "BUE",
-    "johannesburg": "JNB",
+    "toronto": "YTO",
+    "vancouver": "YVR",
+    "montreal": "YMQ"
 }
 
-def _convert_to_city_code(location: str) -> str:
-    """Convert city names to city codes using mapping"""
+def _convert_to_city_code(destination: str) -> str:
+    """Convert destination name to city code"""
+    destination_lower = destination.lower().strip()
     
-    location_lower = location.lower().strip()
+    # Direct mapping
+    if destination_lower in CITY_CODE_MAPPING:
+        return CITY_CODE_MAPPING[destination_lower]
     
-    # Use city code mapping
-    if location_lower in CITY_CODE_MAPPING:
-        return CITY_CODE_MAPPING[location_lower]
+    # Partial matching
+    for city, code in CITY_CODE_MAPPING.items():
+        if city in destination_lower or destination_lower in city:
+            return code
     
-    # If already looks like city code (3 letters, uppercase)
-    if len(location) == 3 and location.isupper():
-        return location
-    
-    # If 3 letters but lowercase, convert to uppercase
-    if len(location) == 3 and location.isalpha():
-        return location.upper()
-    
-    # For longer names, try first 3 letters as fallback
-    if len(location) > 3:
-        return location.upper()[:3]
-    
-    # Default: return as-is and let Amadeus handle it
-    return location.upper()
+    # Fallback: return first 3 letters uppercase
+    return destination_lower[:3].upper()
 
-# ==================== SYSTEM MESSAGES ====================
-
+# ===== System Message =====
 def get_hotel_system_message() -> str:
-    """Get the hotel agent system message with current dates"""
+    """Generate the hotel agent system message with current date"""
     today = datetime.now().strftime("%Y-%m-%d")
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
     
-    return f"""You help users find and book hotels using the Amadeus hotel search system with intelligent group filtering.
+    return f"""You are a specialized hotel search assistant powered by Amadeus API. 
 
 Your main responsibilities are:
 1. Understanding users' hotel needs and extracting key information from natural language descriptions
@@ -399,7 +323,6 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
 
         # OPTIMIZATION 4: Search hotels using Amadeus with ENHANCED parameters for larger datasets
         try:
-            # FIXED: Changed from search_hotels_enhanced to search_hotels
             search_results = await hotel_agent.amadeus_service.search_hotels(
                 city_code=destination_code,
                 check_in_date=check_in_date,
@@ -476,13 +399,14 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
             filtering_result = {
                 "filtered_results": hotels[:10],
                 "total_results": len(hotels),
+                "filtered_count": min(10, len(hotels)),
                 "filter_applied": False,
-                "filter_reason": f"Filtering error: {filter_error}"
+                "filter_reason": "Profile filtering failed - using default"
             }
         
         filtered_hotels = filtering_result.get("filtered_results", hotels[:10])
         filtering_info = {
-            "total_found": len(hotels),
+            "total_found": filtering_result.get("total_results", len(hotels)),
             "filtered_count": len(filtered_hotels),
             "filter_applied": filtering_result.get("filter_applied", False),
             "filter_reason": filtering_result.get("filter_reason", "Standard filtering")
@@ -492,37 +416,25 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
         print(f"🎯 Profile filtering completed in {filtering_time:.2f}s")
         print(f"✅ Filtered to {len(filtered_hotels)} hotels based on user preferences")
         
-        # OPTIMIZATION 7: Cache results for future requests
-        result = {
-            "success": True,
-            "message": f"Found {len(filtered_hotels)} hotels in {destination}",
-            "results": filtered_hotels,
-            "search_id": hotel_search.id,
-            "filtering_info": filtering_info,
-            "metadata": {
-                "destination": destination,
-                "destination_code": destination_code,
-                "check_in_date": check_in_date,
-                "check_out_date": check_out_date,
-                "adults": adults,
-                "rooms": rooms,
-                "search_time": (datetime.now() - start_time).total_seconds()
-            }
-        }
-        
-        # Update instance variables for agent response
+        # OPTIMIZATION 7: Store results for response
         hotel_agent.latest_search_results = filtered_hotels
         hotel_agent.latest_search_id = hotel_search.id
         hotel_agent.latest_filtering_info = filtering_info
         
-        # Cache the results
-        if hasattr(hotel_agent, '_search_cache'):
-            hotel_agent._search_cache[search_key] = result
+        # OPTIMIZATION 8: Cache the result for future requests
+        cache_result = {
+            "success": True,
+            "results": filtered_hotels,
+            "search_id": hotel_search.id,
+            "filtering_info": filtering_info,
+            "message": f"Found {len(filtered_hotels)} hotels in {destination}"
+        }
+        hotel_agent._search_cache[search_key] = cache_result
         
-        elapsed_time = (datetime.now() - start_time).total_seconds()
-        print(f"🏨 ENHANCED hotel search completed in {elapsed_time:.2f}s")
+        total_time = (datetime.now() - start_time).total_seconds()
+        print(f"🏨 ENHANCED hotel search completed in {total_time:.2f}s")
         
-        return result
+        return cache_result
         
     except Exception as e:
         print(f"❌ Error in hotel search tool: {e}")
@@ -629,7 +541,7 @@ class HotelAgent:
                 print("🔄 Continuing hotel conversation with context")
                 result = await self._run_agent_with_retry(self.agent, context_messages + [{"role": "user", "content": message}])
             
-            # Extract response - FIXED: Use dict access instead of attribute access
+            # Extract response
             assistant_message = result.get("final_output") or "I'm sorry, but I encountered an unexpected error while searching for hotels. Would you like me to try again?"
             
             # Get search results from global instance
@@ -693,8 +605,39 @@ class HotelAgent:
             else:
                 raise ValueError(f"Invalid messages format: {type(messages)}")
             
-            # Extract response - match the pattern from flight agent
-            assistant_message = result if isinstance(result, str) else str(result)
+            # Extract clean response - handle RunResult object
+            assistant_message = ""
+            if hasattr(result, 'final_output'):
+                assistant_message = result.final_output
+            elif hasattr(result, 'messages') and result.messages:
+                # Get the last message from the agent
+                last_message = result.messages[-1]
+                if hasattr(last_message, 'content'):
+                    if isinstance(last_message.content, list) and len(last_message.content) > 0:
+                        assistant_message = last_message.content[0].text if hasattr(last_message.content[0], 'text') else str(last_message.content[0])
+                    else:
+                        assistant_message = str(last_message.content)
+                else:
+                    assistant_message = str(last_message)
+            else:
+                # Fallback: convert result to string and clean it
+                result_str = str(result)
+                # Remove the RunResult debug information
+                if "Final output (str):" in result_str:
+                    parts = result_str.split("Final output (str):")
+                    if len(parts) > 1:
+                        # Get everything after "Final output (str):" and clean it
+                        assistant_message = parts[1].strip()
+                        # Remove any trailing debug info
+                        if "\n- " in assistant_message:
+                            assistant_message = assistant_message.split("\n- ")[0].strip()
+                    else:
+                        assistant_message = result_str
+                else:
+                    assistant_message = result_str
+            
+            # Clean up any remaining whitespace
+            assistant_message = assistant_message.strip()
             
             return {
                 "final_output": assistant_message,
