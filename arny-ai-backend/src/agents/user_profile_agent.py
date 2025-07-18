@@ -75,29 +75,26 @@ def retry_on_openai_http_status_error(result):
 def retry_on_openai_validation_failure(result):
     """Condition 5: Retry if validation fails on OpenAI result"""
     try:
-        # Basic validation of expected structure
-        if isinstance(result, dict):
-            if "filtered_results" in result and "total_results" in result:
-                return False  # Valid structure
-            elif result.get("error"):
-                return True  # Error result, should retry
-        return False  # Accept other formats
-    except Exception as e:
-        logger.warning(f"Unexpected validation error: {e}")
-        return True
-    return False
+        if result and hasattr(result, 'output'):
+            return False  # Has expected output structure
+        return True  # Missing expected structure
+    except Exception:
+        return True  # Any validation error
 
 def retry_on_openai_api_exception(exception):
-    """Custom exception checker for OpenAI-specific exceptions"""
-    return "openai" in str(type(exception)).lower() or "api" in str(exception).lower()
+    """Condition 4: Custom exception checker for OpenAI API calls"""
+    exception_str = str(exception).lower()
+    return any(keyword in exception_str for keyword in [
+        'timeout', 'failed', 'unavailable', 'rate limit', 'api error',
+        'connection', 'network', 'server error'
+    ])
 
-# ==================== COMBINED RETRY STRATEGIES ====================
+# ==================== RETRY DECORATORS ====================
 
-# Primary retry strategy for critical OpenAI API operations
 openai_api_retry = retry(
     retry=retry_any(
         # Condition 3: Exception message matching
-        retry_if_exception_message(match=r".*(timeout|failed|unavailable|network|connection|api.?error|rate.?limit).*"),
+        retry_if_exception_message(match=r".*(timeout|failed|unavailable|rate.limit|api.error|connection|network|server.error).*"),
         # Condition 4: Exception types and custom checkers
         retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
         retry_if_exception(retry_on_openai_api_exception),
@@ -237,7 +234,7 @@ class UserProfileAgent:
             except Exception as e:
                 logger.warning(f"Failed to get group profiles: {e}")
                 group_profiles = []
-
+            
             # OPTIMIZATION 3: Direct return if no hotels
             if not hotel_results:
                 result = {
@@ -248,9 +245,6 @@ class UserProfileAgent:
                 }
                 self._filter_cache[cache_key] = result
                 return result
-
-            # REMOVED: Single traveler bypass condition - ALWAYS APPLY AI FILTERING NOW
-            # OLD CODE WAS: if len(group_profiles) <= 1: return top_hotels without filtering
 
             # OPTIMIZATION 4: Enhanced data preparation for all users (single and groups)
             enhanced_hotels = self._extract_enhanced_hotel_data(hotel_results)
@@ -338,6 +332,42 @@ class UserProfileAgent:
             logger.error(f"Error getting group profiles: {e}")
             return []
 
+    async def _get_group_profiles(self, user_id: str) -> List[Dict[str, Any]]:
+        """Get all group profiles for filtering - NO MEMBER LIMITS - FIXED VERSION"""
+        try:
+            print(f"🔍 Getting group profiles for user: {user_id}")
+            
+            # Get user's primary profile first
+            user_profile = await self.db.get_user_profile(user_id)
+            
+            if not user_profile:
+                logger.warning(f"No user profile found for user {user_id}")
+                return []
+            
+            # Handle group_code access properly - FIXED
+            group_code = None
+            if hasattr(user_profile, 'group_code'):
+                group_code = user_profile.group_code
+            elif isinstance(user_profile, dict):
+                group_code = user_profile.get('group_code')
+            
+            if not group_code:
+                print(f"🔍 User {user_id} not in any group - returning individual profile")
+                # Return individual profile as list for consistent processing
+                profile_dict = user_profile.__dict__ if hasattr(user_profile, '__dict__') else user_profile
+                return [profile_dict] if profile_dict else []
+            
+            # Get all group members - NO LIMITS
+            group_profiles = await self.db.get_group_profiles(group_code)
+            print(f"📊 Retrieved {len(group_profiles)} group profiles for group {group_code}")
+            
+            return group_profiles
+            
+        except Exception as e:
+            logger.error(f"Error getting group profiles: {e}")
+            print(f"[ERROR] Error getting group profiles: {e}")
+            return []
+
     def _extract_enhanced_flight_data(self, flights: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """ENHANCED: Extract flight data for up to 50 flights efficiently"""
         enhanced_flights = []
@@ -370,19 +400,19 @@ class UserProfileAgent:
                         enhanced_flight.update({
                             "departure_time": first_segment.get("departure", {}).get("at", ""),
                             "arrival_time": last_segment.get("arrival", {}).get("at", ""),
-                            "airline": first_segment.get("carrierCode", ""),
+                            "stops": max(0, len(segments) - 1),
                             "duration": first_itinerary.get("duration", ""),
-                            "stops": max(0, len(segments) - 1)
+                            "airline": first_segment.get("carrierCode", "")
                         })
                 
                 enhanced_flights.append(enhanced_flight)
                 
             except Exception as e:
-                logger.warning(f"Error extracting flight {i}: {e}")
+                logger.warning(f"Error processing flight {i}: {e}")
                 continue
         
         return enhanced_flights
-    
+
     def _extract_enhanced_hotel_data(self, hotels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """ENHANCED: Extract hotel data for up to 50 hotels efficiently"""
         enhanced_hotels = []
@@ -390,251 +420,204 @@ class UserProfileAgent:
         # Process all hotels but optimize data extraction
         for i, hotel in enumerate(hotels[:50]):  # CHANGED: Process up to 50 hotels
             try:
-                hotel_data = hotel.get("hotel", {})
                 offers = hotel.get("offers", [])
+                first_offer = offers[0] if offers else {}
                 
                 enhanced_hotel = {
                     "id": i + 1,
-                    "name": hotel_data.get("name", ""),
-                    "rating": hotel_data.get("rating", ""),
+                    "name": hotel.get("name", "Unknown Hotel"),
+                    "price": first_offer.get("price", {}).get("total", "N/A"),
+                    "currency": first_offer.get("price", {}).get("currency", ""),
+                    "rating": hotel.get("rating", "N/A"),
+                    "address": hotel.get("address", {}).get("lines", [""])[0] if hotel.get("address", {}).get("lines") else "",
+                    "amenities": hotel.get("amenities", [])[:5],  # First 5 amenities
+                    "distance": hotel.get("distance", {}).get("value", "N/A")
                 }
-                
-                if offers and len(offers) > 0:
-                    first_offer = offers[0]
-                    price = first_offer.get("price", {})
-                    room = first_offer.get("room", {})
-                    
-                    enhanced_hotel.update({
-                        "price": price.get("total", "N/A"),
-                        "currency": price.get("currency", ""),
-                        "room_type": room.get("type", ""),
-                        "beds": room.get("typeEstimated", {}).get("beds", ""),
-                        "check_in": first_offer.get("checkInDate", ""),
-                        "check_out": first_offer.get("checkOutDate", "")
-                    })
                 
                 enhanced_hotels.append(enhanced_hotel)
                 
             except Exception as e:
-                logger.warning(f"Error extracting hotel {i}: {e}")
+                logger.warning(f"Error processing hotel {i}: {e}")
                 continue
         
         return enhanced_hotels
 
     @openai_api_retry
-    async def _filter_flights_with_ai_enhanced(self, enhanced_flights: List[Dict[str, Any]], 
-                                             profile_summary: str, profile_count: int, 
+    async def _filter_flights_with_ai_enhanced(self, flights: List[Dict[str, Any]], 
+                                             profile_summary: str, member_count: int,
                                              original_flights: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """ENHANCED: Use AI to filter flights optimized for all users - NO TIMEOUT LIMITS with Tenacity retry strategies"""
-        
+        """ENHANCED: AI-based flight filtering with support for larger datasets - NO TIMEOUT LIMITS"""
         try:
-            print(f"🧠 AI filtering {len(enhanced_flights)} flights for profile: {profile_summary}")
+            print(f"🧠 AI filtering {len(flights)} flights for profile: {profile_summary}")
             
-            # Ultra-short prompt for efficiency - works for both individuals and groups
-            prompt = f"""Filter flights for traveler profile: {profile_summary}
+            # Create filtering prompt for larger datasets
+            prompt = f"""You are a travel expert helping to filter flight options for travelers.
 
-Profile details: {profile_summary}
+TRAVELER PROFILE: {profile_summary}
 
-Return top 10 flights as JSON: {{"recommended_flights": [{{"id": 1}}, {{"id": 2}}, ...], "filtering_rationale": "brief reason considering the traveler profile and preferences"}}
+FLIGHT OPTIONS ({len(flights)} total):
+{json.dumps(flights[:30], indent=2)}
 
-Flights: {json.dumps(enhanced_flights[:20])}...and {max(0, len(enhanced_flights)-20)} more"""
+TASK: Select the best 10 flights from the provided options based on the traveler profile.
 
-            # Make optimized OpenAI call - NO TIMEOUT LIMITS
-            try:
-                response = self.openai_client.responses.create(
-                    model="o4-mini",
-                    input=prompt
-                )
-            except Exception as api_error:
-                print(f"⚠️ OpenAI API error: {api_error}")
-                # Return fallback result
-                return {
-                    "filtered_results": original_flights[:10],
-                    "total_results": len(enhanced_flights),
-                    "filtering_applied": False,
-                    "reasoning": f"AI filtering unavailable: {str(api_error)}"
-                }
+FILTERING CRITERIA:
+1. Price appropriateness for the traveler's budget level
+2. Flight timing preferences and convenience
+3. Number of stops vs direct flights
+4. Airlines and travel style match
+5. Overall value for money
+
+RESPONSE FORMAT:
+Return ONLY a JSON object with:
+{{
+    "selected_flight_ids": [1, 3, 5, 7, 9, 12, 15, 18, 20, 25],
+    "reasoning": "Brief explanation of selection criteria used"
+}}
+
+Select exactly 10 flight IDs from the provided list."""
+
+            response = self.openai_client.responses.create(
+                model="o4-mini",
+                input=prompt
+            )
             
-            response_text = ""
             if response and hasattr(response, 'output') and response.output:
                 for output_item in response.output:
                     if hasattr(output_item, 'content') and output_item.content:
                         for content_item in output_item.content:
                             if hasattr(content_item, 'text') and content_item.text:
-                                response_text = content_item.text.strip()
-                                break
-                        if response_text:
-                            break
+                                ai_response = content_item.text.strip()
+                                
+                                try:
+                                    result = json.loads(ai_response)
+                                    selected_ids = result.get("selected_flight_ids", [])
+                                    reasoning = result.get("reasoning", "AI filtering applied")
+                                    
+                                    # Map selected IDs back to original flights
+                                    filtered_flights = []
+                                    for flight_id in selected_ids[:10]:  # Ensure max 10
+                                        if 1 <= flight_id <= len(original_flights):
+                                            filtered_flights.append(original_flights[flight_id - 1])
+                                    
+                                    print(f"✅ AI filtered to {len(filtered_flights)} flights")
+                                    
+                                    return {
+                                        "filtered_results": filtered_flights,
+                                        "total_results": len(original_flights),
+                                        "filtering_applied": True,
+                                        "reasoning": reasoning
+                                    }
+                                    
+                                except json.JSONDecodeError:
+                                    logger.warning("AI response was not valid JSON")
             
-            # Check if response is empty
-            if not response_text:
-                print(f"⚠️ Empty response from OpenAI API")
-                return {
-                    "filtered_results": original_flights[:10],
-                    "total_results": len(enhanced_flights),
-                    "filtering_applied": False,
-                    "reasoning": "AI filtering returned empty response"
-                }
-
-            # Enhanced JSON parsing
-            try:
-                json_start = response_text.find('{')
-                json_end = response_text.rfind('}') + 1
-                
-                if json_start >= 0 and json_end > json_start:
-                    json_text = response_text[json_start:json_end]
-                    filtered_result = json.loads(json_text)
-                    
-                    # Map back to original flights (up to 10)
-                    recommended_ids = [f.get("id", 0) for f in filtered_result.get("recommended_flights", [])]
-                    original_flights_mapped = [original_flights[i-1] for i in recommended_ids if 1 <= i <= len(original_flights)]
-                    
-                    # Ensure we return up to 10 results
-                    if len(original_flights_mapped) > 10:
-                        original_flights_mapped = original_flights_mapped[:10]
-                    
-                    print(f"✅ AI filtered to {len(original_flights_mapped)} flights")
-                    
-                    return {
-                        "filtered_results": original_flights_mapped,
-                        "total_results": len(enhanced_flights),
-                        "filtering_applied": True,
-                        "reasoning": filtered_result.get("filtering_rationale", "AI filtering applied based on traveler profile")
-                    }
-                
-            except json.JSONDecodeError as e:
-                print(f"⚠️ JSON parsing failed: {e}")
-            
-            # Fallback: return top 10 flights
-            print(f"⚠️ AI filtering fallback - returning top 10 of {len(original_flights)} flights")
+            # Fallback if AI filtering fails
+            print("❌ AI filtering failed, returning top 10 flights")
             return {
                 "filtered_results": original_flights[:10],
-                "total_results": len(enhanced_flights),
+                "total_results": len(original_flights),
                 "filtering_applied": False,
-                "reasoning": "AI filtering failed, showing top options"
+                "reasoning": "AI filtering failed, returned top results"
             }
             
         except Exception as e:
             logger.error(f"Error in AI flight filtering: {e}")
-            print(f"❌ AI filtering error: {e}")
-            
-            # Graceful fallback
             return {
-                "filtered_results": original_flights[:10] if original_flights else [],
-                "total_results": len(enhanced_flights),
+                "filtered_results": original_flights[:10],
+                "total_results": len(original_flights),
                 "filtering_applied": False,
                 "reasoning": f"AI filtering error: {str(e)}"
             }
 
     @openai_api_retry
-    async def _filter_hotels_with_ai_enhanced(self, enhanced_hotels: List[Dict[str, Any]], 
-                                            profile_summary: str, profile_count: int,
-                                            hotel_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """ENHANCED: Use AI to filter hotels optimized for all users - NO TIMEOUT LIMITS with Tenacity retry strategies"""
-        
+    async def _filter_hotels_with_ai_enhanced(self, hotels: List[Dict[str, Any]], 
+                                            profile_summary: str, member_count: int,
+                                            original_hotels: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """ENHANCED: AI-based hotel filtering with support for larger datasets - NO TIMEOUT LIMITS"""
         try:
-            print(f"🧠 AI filtering {len(enhanced_hotels)} hotels for profile: {profile_summary}")
+            print(f"🧠 AI filtering {len(hotels)} hotels for profile: {profile_summary}")
             
-            # Ultra-short prompt for efficiency - works for both individuals and groups
-            prompt = f"""Filter hotels for traveler profile: {profile_summary}
+            # Create filtering prompt for larger datasets
+            prompt = f"""You are a travel expert helping to filter hotel options for travelers.
 
-Profile details: {profile_summary}
+TRAVELER PROFILE: {profile_summary}
 
-Return top 10 hotels as JSON: {{"recommended_hotels": [{{"id": 1}}, {{"id": 2}}, ...], "filtering_rationale": "brief reason considering the traveler profile and preferences"}}
+HOTEL OPTIONS ({len(hotels)} total):
+{json.dumps(hotels[:30], indent=2)}
 
-Hotels: {json.dumps(enhanced_hotels[:20])}...and {max(0, len(enhanced_hotels)-20)} more"""
+TASK: Select the best 10 hotels from the provided options based on the traveler profile.
 
-            # Make optimized OpenAI call - NO TIMEOUT LIMITS
-            try:
-                response = self.openai_client.responses.create(
-                    model="o4-mini",
-                    input=prompt
-                )
-            except Exception as api_error:
-                print(f"⚠️ OpenAI API error: {api_error}")
-                # Return fallback result
-                return {
-                    "filtered_results": hotel_results[:10],
-                    "total_results": len(enhanced_hotels),
-                    "filtering_applied": False,
-                    "reasoning": f"AI filtering unavailable: {str(api_error)}"
-                }
+FILTERING CRITERIA:
+1. Price appropriateness for the traveler's budget level
+2. Hotel amenities matching traveler preferences
+3. Location and accessibility
+4. Rating and quality standards
+5. Overall value for money
+
+RESPONSE FORMAT:
+Return ONLY a JSON object with:
+{{
+    "selected_hotel_ids": [1, 3, 5, 7, 9, 12, 15, 18, 20, 25],
+    "reasoning": "Brief explanation of selection criteria used"
+}}
+
+Select exactly 10 hotel IDs from the provided list."""
+
+            response = self.openai_client.responses.create(
+                model="o4-mini",
+                input=prompt
+            )
             
-            response_text = ""
             if response and hasattr(response, 'output') and response.output:
                 for output_item in response.output:
                     if hasattr(output_item, 'content') and output_item.content:
                         for content_item in output_item.content:
                             if hasattr(content_item, 'text') and content_item.text:
-                                response_text = content_item.text.strip()
-                                break
-                        if response_text:
-                            break
+                                ai_response = content_item.text.strip()
+                                
+                                try:
+                                    result = json.loads(ai_response)
+                                    selected_ids = result.get("selected_hotel_ids", [])
+                                    reasoning = result.get("reasoning", "AI filtering applied")
+                                    
+                                    # Map selected IDs back to original hotels
+                                    filtered_hotels = []
+                                    for hotel_id in selected_ids[:10]:  # Ensure max 10
+                                        if 1 <= hotel_id <= len(original_hotels):
+                                            filtered_hotels.append(original_hotels[hotel_id - 1])
+                                    
+                                    print(f"✅ AI filtered to {len(filtered_hotels)} hotels")
+                                    
+                                    return {
+                                        "filtered_results": filtered_hotels,
+                                        "total_results": len(original_hotels),
+                                        "filtering_applied": True,
+                                        "reasoning": reasoning
+                                    }
+                                    
+                                except json.JSONDecodeError:
+                                    logger.warning("AI response was not valid JSON")
             
-            # Check if response is empty
-            if not response_text:
-                print(f"⚠️ Empty response from OpenAI API")
-                return {
-                    "filtered_results": hotel_results[:10],
-                    "total_results": len(enhanced_hotels),
-                    "filtering_applied": False,
-                    "reasoning": "AI filtering returned empty response"
-                }
-
-            # Enhanced JSON parsing
-            try:
-                json_start = response_text.find('{')
-                json_end = response_text.rfind('}') + 1
-                
-                if json_start >= 0 and json_end > json_start:
-                    json_text = response_text[json_start:json_end]
-                    filtered_result = json.loads(json_text)
-                    
-                    # Map back to original hotels (up to 10)
-                    recommended_ids = [h.get("id", 0) for h in filtered_result.get("recommended_hotels", [])]
-                    original_hotels = [hotel_results[i-1] for i in recommended_ids if 1 <= i <= len(hotel_results)]
-                    
-                    # Ensure we return up to 10 results
-                    if len(original_hotels) > 10:
-                        original_hotels = original_hotels[:10]
-                    
-                    print(f"✅ AI filtered to {len(original_hotels)} hotels")
-                    
-                    return {
-                        "filtered_results": original_hotels,
-                        "total_results": len(enhanced_hotels),
-                        "filtering_applied": True,
-                        "reasoning": filtered_result.get("filtering_rationale", "AI filtering applied based on traveler profile")
-                    }
-                
-            except json.JSONDecodeError as e:
-                print(f"⚠️ JSON parsing failed: {e}")
-            
-            # Fallback: return top 10 hotels
-            print(f"⚠️ AI filtering fallback - returning top 10 of {len(hotel_results)} hotels")
+            # Fallback if AI filtering fails
+            print("❌ AI filtering failed, returning top 10 hotels")
             return {
-                "filtered_results": hotel_results[:10],
-                "total_results": len(enhanced_hotels),
+                "filtered_results": original_hotels[:10],
+                "total_results": len(original_hotels),
                 "filtering_applied": False,
-                "reasoning": "AI filtering failed, showing top options"
+                "reasoning": "AI filtering failed, returned top results"
             }
-           
+            
         except Exception as e:
             logger.error(f"Error in AI hotel filtering: {e}")
-            print(f"❌ AI filtering error: {e}")
-            
-            # Graceful fallback
             return {
-                "filtered_results": hotel_results[:10] if hotel_results else [],
-                "total_results": len(enhanced_hotels),
+                "filtered_results": original_hotels[:10],
+                "total_results": len(original_hotels),
                 "filtering_applied": False,
                 "reasoning": f"AI filtering error: {str(e)}"
             }
-    
+
     def _create_profile_summary(self, group_profiles: List[Dict[str, Any]]) -> str:
-        """
-        UPDATED: Create a profile summary for both individual travelers and groups
-        """
+        """Create concise profile summary for both individual travelers and groups"""
         try:
             if not group_profiles:
                 return "unknown traveler profile"
