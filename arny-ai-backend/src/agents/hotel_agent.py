@@ -79,29 +79,28 @@ def retry_on_openai_http_status_error(result):
     return False
 
 def retry_on_openai_validation_failure(result):
-    """Condition 5: Retry if validation fails on OpenAI result"""
-    try:
-        if isinstance(result, dict) and result.get("final_output"):
-            AgentRunnerResponse(**result)
-        return False  # Validation passed
-    except ValidationError:
-        return True  # Validation failed, retry
-    except Exception as e:
-        logger.warning(f"Unexpected validation error: {e}")
-        return True
-    return False
+    """Condition 5: Retry on validation failures"""
+    return result is None or (isinstance(result, str) and len(result.strip()) == 0)
 
 def retry_on_openai_api_exception(exception):
-    """Custom exception checker for OpenAI-specific exceptions"""
-    return "openai" in str(type(exception)).lower() or "api" in str(exception).lower()
+    """Condition 3: Check if exception is related to OpenAI API timeouts or rate limits"""
+    exception_str = str(exception).lower()
+    return (
+        "timeout" in exception_str or
+        "rate limit" in exception_str or
+        "429" in exception_str or
+        "502" in exception_str or
+        "503" in exception_str or
+        "504" in exception_str
+    )
 
-# ==================== COMBINED RETRY STRATEGIES ====================
+# ==================== RETRY DECORATORS ====================
 
-# Primary retry strategy for critical OpenAI Agents SDK operations
 openai_api_retry = retry(
+    reraise=True,
     retry=retry_any(
-        # Condition 3: Exception message matching
-        retry_if_exception_message(match=r".*(timeout|failed|unavailable|network|connection|api.?error|rate.?limit).*"),
+        # Condition 3: OpenAI API exceptions (timeouts, rate limits, server errors)
+        retry_if_exception_message(match=r"(?i).*(timeout|rate.limit|429|502|503|504).*"),
         # Condition 4: Exception types and custom checkers
         retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
         retry_if_exception(retry_on_openai_api_exception),
@@ -117,23 +116,64 @@ openai_api_retry = retry(
     before_sleep=before_sleep_log(logger, logging.WARNING)
 )
 
-# ===== City Code Mapping for Hotels =====
+# ==================== CITY CODE MAPPING ====================
+
 CITY_CODE_MAPPING = {
-    # Major cities to city codes for Amadeus Hotel API
+    # Major US cities
     "new york": "NYC",
-    "los angeles": "LAX", 
-    "san francisco": "SFO",
+    "new york city": "NYC",
+    "nyc": "NYC",
+    "los angeles": "LAX",
     "chicago": "CHI",
+    "san francisco": "SFO",
+    "miami": "MIA",
+    "boston": "BOS",
     "washington": "WAS",
     "washington dc": "WAS",
-    "boston": "BOS",
-    "miami": "MIA",
-    "las vegas": "LAS",
     "seattle": "SEA",
-    "denver": "DEN",
+    "las vegas": "LAS",
+    "orlando": "ORL",
     "atlanta": "ATL",
+    "denver": "DEN",
+    "philadelphia": "PHL",
+    "phoenix": "PHX",
+    "houston": "HOU",
+    "dallas": "DFW",
+    "detroit": "DTT",
+    "minneapolis": "MSP",
+    "san diego": "SAN",
+    "tampa": "TPA",
+    "portland": "PDX",
+    "baltimore": "BWI",
+    "nashville": "BNA",
+    "austin": "AUS",
+    "cleveland": "CLE",
+    "pittsburgh": "PIT",
+    "cincinnati": "CVG",
+    "kansas city": "MCI",
+    "st louis": "STL",
+    "salt lake city": "SLC",
+    "sacramento": "SMF",
+    "san jose": "SJC",
+    "memphis": "MEM",
+    "new orleans": "MSY",
+    "milwaukee": "MKE",
+    "columbus": "CMH",
+    "indianapolis": "IND",
+    "jacksonville": "JAX",
+    "charlotte": "CLT",
+    "richmond": "RIC",
+    "norfolk": "ORF",
+    "raleigh": "RDU",
+    "buffalo": "BUF",
+    "albany": "ALB",
+    "rochester": "ROC",
+    "syracuse": "SYR",
+    "hartford": "BDL",
+    "providence": "PVD",
+    "manchester": "MHT",
     
-    # International cities
+    # International major cities
     "london": "LON",
     "paris": "PAR",
     "tokyo": "TYO",
@@ -359,6 +399,7 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
 
         # OPTIMIZATION 4: Search hotels using Amadeus with ENHANCED parameters for larger datasets
         try:
+            # FIXED: Changed from search_hotels_enhanced to search_hotels
             search_results = await hotel_agent.amadeus_service.search_hotels(
                 city_code=destination_code,
                 check_in_date=check_in_date,
@@ -435,56 +476,56 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
             filtering_result = {
                 "filtered_results": hotels[:10],
                 "total_results": len(hotels),
-                "filtering_applied": False,
-                "reasoning": f"Filtering failed: {str(filter_error)}"
+                "filter_applied": False,
+                "filter_reason": f"Filtering error: {filter_error}"
             }
+        
+        filtered_hotels = filtering_result.get("filtered_results", hotels[:10])
+        filtering_info = {
+            "total_found": len(hotels),
+            "filtered_count": len(filtered_hotels),
+            "filter_applied": filtering_result.get("filter_applied", False),
+            "filter_reason": filtering_result.get("filter_reason", "Standard filtering")
+        }
         
         filtering_time = (datetime.now() - filtering_start).total_seconds()
         print(f"🎯 Profile filtering completed in {filtering_time:.2f}s")
-        
-        filtered_hotels = filtering_result.get('filtered_results', hotels[:10])  # Fallback to first 10
-        filtering_info = {
-            "filtering_applied": filtering_result.get('filtering_applied', False),
-            "original_count": len(hotels),
-            "filtered_count": len(filtered_hotels),
-            "reasoning": filtering_result.get('reasoning', 'No filtering applied')
-        }
-        
         print(f"✅ Filtered to {len(filtered_hotels)} hotels based on user preferences")
         
-        # OPTIMIZATION 7: Update instance variables for response (FIXED to use filtered results)
+        # OPTIMIZATION 7: Cache results for future requests
+        result = {
+            "success": True,
+            "message": f"Found {len(filtered_hotels)} hotels in {destination}",
+            "results": filtered_hotels,
+            "search_id": hotel_search.id,
+            "filtering_info": filtering_info,
+            "metadata": {
+                "destination": destination,
+                "destination_code": destination_code,
+                "check_in_date": check_in_date,
+                "check_out_date": check_out_date,
+                "adults": adults,
+                "rooms": rooms,
+                "search_time": (datetime.now() - start_time).total_seconds()
+            }
+        }
+        
+        # Update instance variables for agent response
         hotel_agent.latest_search_results = filtered_hotels
         hotel_agent.latest_search_id = hotel_search.id
         hotel_agent.latest_filtering_info = filtering_info
         
-        # OPTIMIZATION 8: Build response
-        response = {
-            "success": True,
-            "results": filtered_hotels,
-            "search_id": hotel_search.id,
-            "filtering_info": filtering_info,
-            "message": f"Found {len(filtered_hotels)} hotels in {destination}",
-            "search_params": {
-                "city_code": destination_code,
-                "check_in_date": check_in_date,
-                "check_out_date": check_out_date,
-                "adults": adults,
-                "rooms": rooms
-            }
-        }
-        
-        # OPTIMIZATION 10: Cache the response
-        if not hasattr(hotel_agent, '_search_cache'):
-            hotel_agent._search_cache = {}
-        hotel_agent._search_cache[search_key] = response
+        # Cache the results
+        if hasattr(hotel_agent, '_search_cache'):
+            hotel_agent._search_cache[search_key] = result
         
         elapsed_time = (datetime.now() - start_time).total_seconds()
         print(f"🏨 ENHANCED hotel search completed in {elapsed_time:.2f}s")
         
-        return response
+        return result
         
     except Exception as e:
-        print(f"❌ Error in hotel search: {e}")
+        print(f"❌ Error in hotel search tool: {e}")
         import traceback
         traceback.print_exc()
         return {
@@ -588,8 +629,8 @@ class HotelAgent:
                 print("🔄 Continuing hotel conversation with context")
                 result = await self._run_agent_with_retry(self.agent, context_messages + [{"role": "user", "content": message}])
             
-            # Extract response
-            assistant_message = result.final_output or "I'm sorry, but I encountered an unexpected error while searching for hotels. Would you like me to try again?"
+            # Extract response - FIXED: Use dict access instead of attribute access
+            assistant_message = result.get("final_output") or "I'm sorry, but I encountered an unexpected error while searching for hotels. Would you like me to try again?"
             
             # Get search results from global instance
             global_agent = _get_hotel_agent()
@@ -644,32 +685,21 @@ class HotelAgent:
             
             # Handle different message formats
             if isinstance(messages, str):
-                # Single message
-                runner = Runner(agent=agent, messages=[{"role": "user", "content": messages}])
+                # Single message - use the same pattern as flight agent
+                result = await Runner.run(agent, messages)
             elif isinstance(messages, list):
-                # List of messages
-                runner = Runner(agent=agent, messages=messages)
+                # List of messages - use the same pattern as flight agent
+                result = await Runner.run(agent, messages)
             else:
                 raise ValueError(f"Invalid messages format: {type(messages)}")
             
-            # Run the agent
-            await runner.run()
+            # Extract response - match the pattern from flight agent
+            assistant_message = result if isinstance(result, str) else str(result)
             
-            # Get final message
-            final_message = ""
-            if runner.messages:
-                final_message = runner.messages[-1].content[0].text if runner.messages[-1].content else ""
-            
-            result = {
-                "final_output": final_message,
-                "messages": runner.messages
+            return {
+                "final_output": assistant_message,
+                "messages": []  # Runner.run doesn't return messages like the old pattern
             }
-            
-            # Validate response
-            AgentRunnerResponse(**result)
-            
-            print("✅ Hotel agent execution successful")
-            return result
             
         except Exception as e:
             print(f"❌ Hotel agent execution failed: {e}")
