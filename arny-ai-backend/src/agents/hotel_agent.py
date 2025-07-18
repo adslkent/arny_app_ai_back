@@ -50,6 +50,73 @@ from .user_profile_agent import UserProfileAgent
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# ==================== PYDANTIC MODELS FOR VALIDATION ====================
+
+class AgentRunnerResponse(BaseModel):
+    """Pydantic model for Agent Runner response validation"""
+    final_output: Optional[str] = None
+
+# ==================== OPENAI AGENTS SDK RETRY CONDITIONS ====================
+
+def retry_on_openai_api_error_result(result):
+    """Condition 2: Retry if OpenAI API result contains error/warning fields"""
+    if hasattr(result, 'error') and result.error:
+        return True
+    if isinstance(result, dict):
+        return (
+            result.get("error") is not None or
+            "warning" in result or
+            result.get("success") is False
+        )
+    return False
+
+def retry_on_openai_http_status_error(result):
+    """Condition 1: Retry on HTTP status errors for OpenAI API calls"""
+    if hasattr(result, 'status_code'):
+        return result.status_code >= 400
+    if hasattr(result, 'response') and hasattr(result.response, 'status_code'):
+        return result.response.status_code >= 400
+    return False
+
+def retry_on_openai_validation_failure(result):
+    """Condition 5: Retry if validation fails on OpenAI result"""
+    try:
+        if isinstance(result, dict) and result.get("final_output"):
+            AgentRunnerResponse(**result)
+        return False  # Validation passed
+    except ValidationError:
+        return True  # Validation failed, retry
+    except Exception as e:
+        logger.warning(f"Unexpected validation error: {e}")
+        return True
+    return False
+
+def retry_on_openai_api_exception(exception):
+    """Custom exception checker for OpenAI-specific exceptions"""
+    return "openai" in str(type(exception)).lower() or "api" in str(exception).lower()
+
+# ==================== COMBINED RETRY STRATEGIES ====================
+
+# Primary retry strategy for critical OpenAI Agents SDK operations
+openai_api_retry = retry(
+    retry=retry_any(
+        # Condition 3: Exception message matching
+        retry_if_exception_message(match=r".*(timeout|failed|unavailable|network|connection|api.?error|rate.?limit).*"),
+        # Condition 4: Exception types and custom checkers
+        retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
+        retry_if_exception(retry_on_openai_api_exception),
+        # Condition 2: Error/warning field inspection
+        retry_if_result(retry_on_openai_api_error_result),
+        # Condition 1: HTTP status code checking
+        retry_if_result(retry_on_openai_http_status_error),
+        # Condition 5: Validation failure
+        retry_if_result(retry_on_openai_validation_failure)
+    ),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1.5, min=1, max=15),
+    before_sleep=before_sleep_log(logger, logging.WARNING)
+)
+
 # ===== City Code Mapping for Hotels =====
 CITY_CODE_MAPPING = {
     # Major cities to city codes for Amadeus Hotel API
@@ -143,80 +210,54 @@ def _convert_to_city_code(location: str) -> str:
     # Default: return as-is and let Amadeus handle it
     return location.upper()
 
-# ==================== PYDANTIC MODELS FOR VALIDATION ====================
+# ==================== SYSTEM MESSAGES ====================
 
-class AgentRunnerResponse(BaseModel):
-    """Pydantic model for Agent Runner response validation"""
-    final_output: Optional[str] = None
+def get_hotel_system_message() -> str:
+    """Get the hotel agent system message with current dates"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    return f"""You help users find and book hotels using the Amadeus hotel search system with intelligent group filtering.
 
-# ==================== OPENAI AGENTS SDK RETRY CONDITIONS ====================
+Your main responsibilities are:
+1. Understanding users' hotel needs and extracting key information from natural language descriptions
+2. Using the search_hotels_tool to search for hotels that meet user requirements
+3. Presenting hotel options in a clear, organized format
 
-def retry_on_openai_api_error_result(result):
-    """Condition 2: Retry if OpenAI API result contains error/warning fields"""
-    if hasattr(result, 'error') and result.error:
-        return True
-    if isinstance(result, dict):
-        return (
-            result.get("error") is not None or
-            "warning" in result or
-            result.get("success") is False
-        )
-    return False
+**IMPORTANT PRESENTATION RULES:**
+- When you receive hotel search results, ALWAYS present ALL hotels in your response
+- Do NOT truncate or summarize the hotel list - show complete details for every result
+- Present hotels in an organized, easy-to-read format
+- Include all key details: name, price, rating, amenities, location
+- Number each hotel option for easy reference
 
-def retry_on_openai_http_status_error(result):
-    """Condition 1: Retry on HTTP status errors for OpenAI API calls"""
-    if hasattr(result, 'status_code'):
-        return result.status_code >= 400
-    if hasattr(result, 'response') and hasattr(result.response, 'status_code'):
-        return result.response.status_code >= 400
-    return False
+Today's date: {today}
+Tomorrow's date: {tomorrow}
 
-def retry_on_openai_validation_failure(result):
-    """Condition 5: Retry if validation against OpenAI response schema fails"""
-    if result is None:
-        return True
-    try:
-        if isinstance(result, dict):
-            AgentRunnerResponse(**result)
-        elif hasattr(result, 'final_output'):
-            AgentRunnerResponse(final_output=result.final_output)
-        else:
-            AgentRunnerResponse(final_output=str(result))
-        return False  # Validation passed
-    except ValidationError as e:
-        logger.warning(f"OpenAI Agent response validation failed: {e}")
-        return True  # Validation failed, retry
+**Key Guidelines:**
+1. **Date Handling**: If user says "tomorrow", use {tomorrow}. If no year specified, assume current year.
 
-def retry_on_openai_exception_type(exception):
-    """Custom exception checker for OpenAI-specific exceptions"""
-    return isinstance(exception, (requests.exceptions.RequestException, ConnectionError, TimeoutError))
+2. **Hotel Search**: Always use search_hotels_tool for hotel requests. Extract:
+   - Destination city/location
+   - Check-in date (format: YYYY-MM-DD)
+   - Check-out date (format: YYYY-MM-DD)
+   - Number of adults (default: 1)
+   - Number of rooms (default: 1)
 
-# ==================== OPENAI AGENTS SDK RETRY STRATEGY ====================
+3. **Response Style**: Be professional, helpful, and provide clear options. When presenting multiple hotels, organize them clearly and include all important details.
 
-openai_agents_sdk_retry = retry(
-    retry=retry_any(
-        # Condition 3: Exception message matching
-        retry_if_exception_message(match=r".*(timeout|failed|unavailable|network|connection|429|502|503|504|rate.?limit).*"),
-        # Condition 4: Exception types
-        retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, TimeoutError, requests.exceptions.Timeout)),
-        # Custom exception checker
-        retry_if_exception(retry_on_openai_exception_type),
-        # Condition 2: Error/warning field inspection
-        retry_if_result(retry_on_openai_api_error_result),
-        # Condition 1: HTTP status code checking
-        retry_if_result(retry_on_openai_http_status_error),
-        # Condition 5: Validation failure
-        retry_if_result(retry_on_openai_validation_failure)
-    ),
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    before_sleep=before_sleep_log(logger, logging.WARNING)
-)
+4. **No Booking**: You can search and provide hotel information, but cannot make actual bookings. Direct users to hotel websites or booking platforms for reservations.
 
-# ==================== ASYNCIO HELPERS ====================
+5. **Missing Information**: If critical details are missing, ask for clarification before searching.
+
+6. **Date Validation**: Ensure check-in date is in the future and check-out date is after check-in date.
+
+Remember: You are a specialized hotel search agent. Focus on hotel-related queries and use your tools effectively to provide the best accommodation options for users."""
+
+# ==================== ASYNC UTILITIES ====================
 
 def run_async(coro):
-    """Run async function in sync context"""
+    """Run async coroutine in sync context"""
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
@@ -338,114 +379,89 @@ async def search_hotels_tool(destination: str, check_in_date: str, check_out_dat
                 "message": f"I'm having trouble finding hotels in {destination}. Please try a different city or try again later."
             }
         
-        if not search_results or "results" not in search_results:
+        if not search_results.get("success"):
             return {
                 "success": False,
-                "error": "No hotels found",
+                "error": search_results.get("error", "Hotel search failed"),
                 "message": f"I couldn't find any hotels in {destination} for your dates. Please try different dates or destinations."
             }
         
-        raw_hotels = search_results.get("results", [])
+        hotels = search_results.get("results", [])
+        print(f"🔍 Found {len(hotels)} raw hotels from Amadeus")
         
-        if not raw_hotels:
-            return {
-                "success": False,
-                "error": "No hotels found",
-                "message": f"I couldn't find any hotels in {destination} for your dates. Please try different dates or destinations."
+        # OPTIMIZATION 5: Store in database with enhanced metadata
+        user_id = hotel_agent.current_user_id
+        session_id = hotel_agent.current_session_id
+        
+        hotel_search = HotelSearch(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            session_id=session_id,
+            city_code=destination_code,  # FIXED: Use city_code instead of destination
+            check_in_date=check_in_date,
+            check_out_date=check_out_date,
+            adults=adults,
+            rooms=rooms,
+            search_results=hotels,
+            search_successful=True,  # ADDED: Set search_successful flag
+            result_count=len(hotels)  # ADDED: Set result count
+        )
+        
+        try:
+            await hotel_agent.db.save_hotel_search(hotel_search)
+            print(f"💾 Saved search with ID: {hotel_search.id}")
+        except Exception as save_error:
+            print(f"⚠️ Failed to save hotel search: {save_error}")
+            # Continue processing even if save fails
+        
+        # OPTIMIZATION 6: ENHANCED filtering with profile agent (send ALL hotels for filtering)
+        print(f"🧠 Filtering {len(hotels)} hotels with group profiles...")
+        filtering_start = datetime.now()
+        
+        try:
+            filtering_result = await hotel_agent.profile_agent.filter_hotel_results(
+                user_id=user_id,
+                hotel_results=hotels,  # Send ALL hotels for filtering
+                search_params={
+                    "city_code": destination_code,
+                    "check_in_date": check_in_date,
+                    "check_out_date": check_out_date,
+                    "adults": adults,
+                    "rooms": rooms
+                }
+            )
+        except Exception as filter_error:
+            print(f"⚠️ Filtering failed, using top 10 hotels: {filter_error}")
+            filtering_result = {
+                "filtered_results": hotels[:10],
+                "total_results": len(hotels),
+                "filtering_applied": False,
+                "reasoning": f"Filtering failed: {str(filter_error)}"
             }
         
-        print(f"🔍 Found {len(raw_hotels)} raw hotels from Amadeus")
+        filtering_time = (datetime.now() - filtering_start).total_seconds()
+        print(f"🎯 Profile filtering completed in {filtering_time:.2f}s")
         
-        # OPTIMIZATION 5: Get user profile for filtering (safely handle missing profile)
-        user_profile = getattr(hotel_agent, 'user_profile', {}) or {}
-        group_profiles = user_profile.get('group_profiles', [])
-        
-        # OPTIMIZATION 6: Enhanced hotel filtering for groups and preferences using OpenAI
-        filtered_hotels = []
+        filtered_hotels = filtering_result.get('filtered_results', hotels[:10])  # Fallback to first 10
         filtering_info = {
-            "filtering_applied": False,
-            "original_count": len(raw_hotels),
-            "group_size": len(group_profiles) + 1,  # +1 for primary user
-            "rationale": ""
+            "filtering_applied": filtering_result.get('filtering_applied', False),
+            "original_count": len(hotels),
+            "filtered_count": len(filtered_hotels),
+            "reasoning": filtering_result.get('reasoning', 'No filtering applied')
         }
         
-        if len(raw_hotels) > 10:  # ENHANCED: Only filter if we have more than 10 hotels
-            print(f"🧠 Filtering {len(raw_hotels)} hotels with group profiles...")
-            
-            try:
-                # Build filter prompt for OpenAI
-                filter_prompt = _build_hotel_filter_prompt(raw_hotels, user_profile, group_profiles, destination, adults, rooms)
-                
-                # Call OpenAI for filtering using direct API call for better control
-                filtering_response = await hotel_agent.openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {
-                            "role": "system", 
-                            "content": "You are a hotel filtering assistant. Analyze the provided hotels and return the top 10 that best match the user's profile and group preferences. Respond with valid JSON only."
-                        },
-                        {"role": "user", "content": filter_prompt}
-                    ],
-                    temperature=0.1,
-                    max_tokens=4000
-                )
-                
-                # Parse the filtering response
-                filter_result = json.loads(filtering_response.choices[0].message.content)
-                filtered_hotels = filter_result.get("filtered_hotels", raw_hotels[:10])
-                
-                filtering_info.update({
-                    "filtering_applied": True,
-                    "rationale": filter_result.get("rationale", "Filtered based on group preferences and user profile")
-                })
-                
-                print(f"✅ OpenAI filtered to {len(filtered_hotels)} hotels")
-                
-            except Exception as e:
-                print(f"⚠️ Filtering failed, using top 10 hotels: {e}")
-                filtered_hotels = raw_hotels[:10]
-        else:
-            # If 10 or fewer hotels, use all of them
-            filtered_hotels = raw_hotels
-            print(f"📋 Using all {len(filtered_hotels)} hotels (no filtering needed)")
+        print(f"✅ Filtered to {len(filtered_hotels)} hotels based on user preferences")
         
-        # OPTIMIZATION 7: Generate search ID and store results
-        search_id = str(uuid.uuid4())
-        
-        # OPTIMIZATION 8: Store search in database (async)
-        if hotel_agent.current_user_id:
-            try:
-                search_record = HotelSearch(
-                    user_id=hotel_agent.current_user_id,
-                    session_id=hotel_agent.current_session_id,
-                    search_id=search_id,
-                    destination=destination,
-                    destination_code=destination_code,
-                    check_in_date=datetime.strptime(check_in_date, "%Y-%m-%d").date(),
-                    check_out_date=datetime.strptime(check_out_date, "%Y-%m-%d").date(),
-                    adults=adults,
-                    rooms=rooms,
-                    search_results=filtered_hotels,
-                    result_count=len(filtered_hotels)
-                )
-                
-                # Save asynchronously (don't wait for completion)
-                asyncio.create_task(hotel_agent.db.create_hotel_search(search_record))
-                print(f"💾 Hotel search saved asynchronously")
-                
-            except Exception as e:
-                print(f"⚠️ Failed to save hotel search: {e}")
-        
-        # OPTIMIZATION 9: Update agent state
+        # OPTIMIZATION 7: Update instance variables for response (FIXED to use filtered results)
         hotel_agent.latest_search_results = filtered_hotels
-        hotel_agent.latest_search_id = search_id
+        hotel_agent.latest_search_id = hotel_search.id
         hotel_agent.latest_filtering_info = filtering_info
         
-        # Build response
+        # OPTIMIZATION 8: Build response
         response = {
             "success": True,
             "results": filtered_hotels,
-            "search_id": search_id,
+            "search_id": hotel_search.id,
             "filtering_info": filtering_info,
             "message": f"Found {len(filtered_hotels)} hotels in {destination}",
             "search_params": {
@@ -562,195 +578,104 @@ class HotelAgent:
             
             print(f"🔧 Processing with {len(context_messages)} previous messages")
             
-            # ENHANCED: Create conversation with proper context handling
-            if context_messages:
-                print(f"🚀 Continuing hotel conversation with context")
-                # Add the current message to context
-                context_messages.append({
-                    "role": "user",
-                    "content": message
-                })
-                result = await self._run_agent_with_retry(self.agent, context_messages)
-            else:
-                print(f"🚀 Starting new hotel conversation")
+            # ENHANCED: Direct agent processing with improved efficiency
+            if not context_messages:
+                # First message in conversation
+                print("🚀 Starting new hotel conversation")
                 result = await self._run_agent_with_retry(self.agent, message)
+            else:
+                # Continue conversation with context
+                print("🔄 Continuing hotel conversation with context")
+                result = await self._run_agent_with_retry(self.agent, context_messages + [{"role": "user", "content": message}])
             
-            # Extract final response
-            response_text = result.final_output if hasattr(result, 'final_output') else str(result)
+            # Extract response
+            assistant_message = result.final_output or "I'm sorry, but I encountered an unexpected error while searching for hotels. Would you like me to try again?"
             
-            # Calculate processing time
-            processing_time = (datetime.now() - start_time).total_seconds()
-            print(f"✅ ENHANCED HotelAgent completed in {processing_time:.2f}s")
+            # Get search results from global instance
+            global_agent = _get_hotel_agent()
+            search_results = global_agent.latest_search_results if global_agent else []
+            search_id = global_agent.latest_search_id if global_agent else None
+            filtering_info = global_agent.latest_filtering_info if global_agent else {}
             
-            # Return comprehensive response with all search data for supervisor
+            elapsed_time = (datetime.now() - start_time).total_seconds()
+            print(f"✅ ENHANCED HotelAgent completed in {elapsed_time:.2f}s")
+            print(f"📊 Retrieved search data: {len(search_results)} results, search_id: {search_id}")
+            
             return {
-                "response": response_text,
-                "agent_type": "hotel", 
+                "message": assistant_message,
+                "agent_type": "hotel",
                 "requires_action": False,
-                "search_results": self.latest_search_results,
-                "search_id": self.latest_search_id,
-                "filtering_info": self.latest_filtering_info,
+                "search_results": search_results,
+                "search_id": search_id,
+                "filtering_info": filtering_info,
                 "metadata": {
                     "agent_type": "hotel",
                     "conversation_type": "hotel_search",
-                    "processing_time": processing_time
+                    "processing_time": elapsed_time
                 }
             }
-            
+        
         except Exception as e:
-            logger.error(f"Hotel agent error: {str(e)}")
+            print(f"❌ Error in hotel agent: {e}")
             import traceback
             traceback.print_exc()
-            
             return {
-                "response": "I'm sorry, but I encountered an unexpected error while searching for hotels. Would you like me to try again? If you'd prefer, I can also adjust the parameters or check availability for different dates. Let me know how you'd like to proceed!",
+                "message": "I'm sorry, I encountered an error while searching for hotels. Please try again with different dates or destinations.",
                 "agent_type": "hotel",
-                "error": str(e),
                 "requires_action": False,
                 "search_results": [],
                 "search_id": None,
-                "filtering_info": {}
+                "filtering_info": {},
+                "metadata": {
+                    "agent_type": "hotel",
+                    "conversation_type": "hotel_search",
+                    "processing_time": 0,
+                    "error": str(e)
+                }
             }
     
-    # ==================== HELPER METHODS ====================
-        
-    @openai_agents_sdk_retry
-    async def _run_agent_with_retry(self, agent, messages):
-        """Run agent with retry logic and validation - ENHANCED for NO TIMEOUT LIMITS"""
-        
+    # ==================== AGENT EXECUTION WITH RETRY ====================
+    
+    @openai_api_retry
+    async def _run_agent_with_retry(self, agent: Agent, messages) -> Dict[str, Any]:
+        """Run agent with retry logic and proper error handling"""
         try:
-            print(f"🔄 Running hotel agent with retry logic...")
+            print("🔄 Running hotel agent with retry logic...")
             
-            # FIXED: Use Runner.run as static method instead of instantiating Runner
+            # Handle different message formats
             if isinstance(messages, str):
                 # Single message
-                result = await Runner.run(agent, messages)
+                runner = Runner(agent=agent, messages=[{"role": "user", "content": messages}])
+            elif isinstance(messages, list):
+                # List of messages
+                runner = Runner(agent=agent, messages=messages)
             else:
-                # Multiple messages (conversation context)
-                result = await Runner.run(agent, messages)
+                raise ValueError(f"Invalid messages format: {type(messages)}")
             
-            # ENHANCED: Validate result and ensure it has the required structure
-            if not result:
-                raise ValueError("Agent returned empty result")
+            # Run the agent
+            await runner.run()
             
-            # Convert to our expected format if needed
-            if hasattr(result, 'final_output'):
-                validated_result = AgentRunnerResponse(final_output=result.final_output)
-            elif isinstance(result, dict) and 'final_output' in result:
-                validated_result = AgentRunnerResponse(**result)
-            else:
-                # Try to extract message from different result formats
-                if hasattr(result, 'content'):
-                    validated_result = AgentRunnerResponse(final_output=str(result.content))
-                elif hasattr(result, 'message'):
-                    validated_result = AgentRunnerResponse(final_output=str(result.message))
-                else:
-                    validated_result = AgentRunnerResponse(final_output=str(result))
+            # Get final message
+            final_message = ""
+            if runner.messages:
+                final_message = runner.messages[-1].content[0].text if runner.messages[-1].content else ""
             
-            print(f"✅ Hotel agent execution successful")
-            return validated_result
+            result = {
+                "final_output": final_message,
+                "messages": runner.messages
+            }
+            
+            # Validate response
+            AgentRunnerResponse(**result)
+            
+            print("✅ Hotel agent execution successful")
+            return result
             
         except Exception as e:
             print(f"❌ Hotel agent execution failed: {e}")
-            # Re-raise for retry logic to catch
-            raise e
-
-# ==================== HELPER FUNCTIONS ====================
-
-def _build_hotel_filter_prompt(hotels: List[Dict], user_profile: Dict, group_profiles: List[Dict], 
-                              destination: str, adults: int, rooms: int) -> str:
-    """Build filtering prompt for OpenAI to select best hotels for user/group"""
-    
-    # Extract relevant user preferences
-    preferences = user_profile.get('preferences', {})
-    travel_style = preferences.get('travel_style', 'standard')
-    budget_range = preferences.get('budget_range', 'moderate')
-    
-    # Build group context
-    group_context = ""
-    if group_profiles:
-        group_context = f"\n\nGroup Information:\n"
-        group_context += f"- Total travelers: {len(group_profiles) + 1} people\n"
-        group_context += f"- Requested adults: {adults}, rooms: {rooms}\n"
-        
-        # Add group preferences if available
-        for i, profile in enumerate(group_profiles):
-            name = profile.get('name', f'Traveler {i+1}')
-            group_context += f"- {name}: {profile.get('preferences', {})}\n"
-    
-    # Build hotel list for analysis
-    hotel_list = ""
-    for i, hotel in enumerate(hotels[:30], 1):  # Limit to 30 for prompt size
-        hotel_list += f"{i}. {json.dumps(hotel, indent=2)}\n\n"
-    
-    prompt = f"""Please analyze these {len(hotels)} hotels in {destination} and select the top 10 that best match the user's preferences.
-
-User Profile:
-- Travel Style: {travel_style}
-- Budget Range: {budget_range}
-- All Preferences: {preferences}
-{group_context}
-
-Hotels to analyze:
-{hotel_list}
-
-Please respond with valid JSON in this exact format:
-{{
-    "filtered_hotels": [
-        // Array of the top 10 hotel objects (full objects, not just IDs)
-    ],
-    "rationale": "Brief explanation of why these hotels were selected"
-}}
-
-Consider factors like:
-- Price range matching budget preferences
-- Star rating and amenities matching travel style
-- Location convenience
-- Group accommodation needs if applicable
-- Overall value for money"""
-
-    return prompt
-
-# ==================== HOTEL SYSTEM MESSAGE ====================
-
-def get_hotel_system_message() -> str:
-    """Generate hotel system message with current date"""
-    today = datetime.now().strftime("%Y-%m-%d")
-    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-    
-    return f"""You are Arny's professional hotel search specialist. You help users find and book hotels using the Amadeus hotel search system with intelligent group filtering.
-
-Your main responsibilities are:
-1. Understanding users' hotel needs and extracting key information from natural language descriptions
-2. Using the search_hotels_tool to search for hotels that meet user requirements
-3. Presenting hotel options in a clear, organized format
-
-**IMPORTANT PRESENTATION RULES:**
-- When you receive hotel search results, ALWAYS present ALL hotels in your response
-- Do NOT truncate or summarize the hotel list - show complete details for every result
-- Present hotels in an organized, easy-to-read format
-- Include all key details: name, price, rating, amenities, location
-- Number each hotel option for easy reference
-
-Today's date: {today}
-Tomorrow's date: {tomorrow}
-
-**Key Guidelines:**
-1. **Date Handling**: If user says "tomorrow", use {tomorrow}. If no year specified, assume current year.
-
-2. **Hotel Search**: Always use search_hotels_tool for hotel requests. Extract:
-   - Destination city/location
-   - Check-in date (format: YYYY-MM-DD)
-   - Check-out date (format: YYYY-MM-DD)
-   - Number of adults (default: 1)
-   - Number of rooms (default: 1)
-
-3. **Response Style**: Be professional, helpful, and provide clear options. When presenting multiple hotels, organize them clearly and include all important details.
-
-4. **No Booking**: You can search and provide hotel information, but cannot make actual bookings. Direct users to hotel websites or booking platforms for reservations.
-
-5. **Missing Information**: If critical details are missing, ask for clarification before searching.
-
-6. **Date Validation**: Ensure check-in date is in the future and check-out date is after check-in date.
-
-Remember: You are a specialized hotel search agent. Focus on hotel-related queries and use your tools effectively to provide the best accommodation options for users."""
+            # Return error response that will trigger retry
+            return {
+                "final_output": None,
+                "error": str(e),
+                "success": False
+            }
