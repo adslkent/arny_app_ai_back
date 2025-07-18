@@ -577,8 +577,8 @@ class FlightAgent:
             # Build conversation context
             context_messages = []
             
-            # Add recent conversation history (last 10 messages)
-            for msg in conversation_history[-10:]:
+            # Add recent conversation history (last 50 messages)
+            for msg in conversation_history[-50:]:
                 context_messages.append({
                     "role": msg.message_type,
                     "content": msg.content
