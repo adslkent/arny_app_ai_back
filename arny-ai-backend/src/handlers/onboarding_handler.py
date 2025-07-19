@@ -194,10 +194,18 @@ class OnboardingHandler:
                     if is_group_invite_case:
                         print(f"📧 Group invite case detected - using enhanced verification")
                         import asyncio
-                        await asyncio.sleep(1.0)  # Longer wait for group invite cases
+                        await asyncio.sleep(1.5)  # Longer wait for group invite cases
                     else:
+                        print(f"👤 Regular completion case")
                         import asyncio
                         await asyncio.sleep(0.5)  # Standard wait
+
+                    # Call complete_onboarding with collected data
+                    collected_data = agent_response.get('collected_data', {})
+                    print(f"💾 Saving collected data to database: {collected_data}")
+                    completion_success = await self.db.complete_onboarding(user_id, collected_data)
+
+                    print(f"💾 Onboarding completion in database: {completion_success}")
                     
                     # Enhanced verification with multiple attempts
                     verification_attempts = 3 if is_group_invite_case else 2
