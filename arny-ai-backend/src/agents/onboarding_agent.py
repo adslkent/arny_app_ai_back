@@ -1,30 +1,3 @@
-"""
-Enhanced Onboarding Agent Module
-
-This module provides the onboarding agent with enhanced completion detection
-and robust handling of all onboarding scenarios including group setup.
-
-The agent uses OpenAI's Agents SDK with enhanced retry strategies and
-multiple completion detection methods for maximum reliability.
-
-Features:
-- Interactive questionnaire with dynamic flow
-- Email scanning and prepopulation
-- Group management (admin/member roles)
-- Enhanced completion detection with multiple validation methods
-- Comprehensive retry strategies for all API calls
-- Graceful error handling and fallback mechanisms
-
-Usage example:
-```python
-from onboarding_agent import OnboardingAgent
-
-# Create and use the agent
-agent = OnboardingAgent()
-result = await agent.process_message(user_id, message, session_id, progress_data)
-```
-"""
-
 import json
 import asyncio
 import concurrent.futures
@@ -100,7 +73,7 @@ def retry_on_openai_validation_failure(result):
         return True
 
 def retry_on_agent_runner_validation_failure(result):
-    """Condition 5: Retry if Agent Runner result fails validation"""
+    """Condition 5: Retry if Agent Runner result fails Pydantic validation"""
     try:
         if result:
             AgentRunnerResponse.model_validate(result.__dict__ if hasattr(result, '__dict__') else result)
@@ -116,8 +89,7 @@ def retry_on_openai_api_exception(exception):
         'connection', 'network', 'server error'
     ])
 
-# ==================== RETRY DECORATORS ====================
-
+# OpenAI Responses API retry decorator with all 5 conditions
 openai_responses_api_retry = retry(
     retry=retry_any(
         # Condition 3: Exception message matching
@@ -137,6 +109,7 @@ openai_responses_api_retry = retry(
     before_sleep=before_sleep_log(logger, logging.WARNING)
 )
 
+# OpenAI Agents SDK retry decorator with all 5 conditions
 openai_agents_sdk_retry = retry(
     retry=retry_any(
         # Condition 3: Exception message matching
@@ -200,31 +173,52 @@ def scan_email_for_profile_tool(email: str) -> dict:
         if not agent:
             return {"error": "Agent not available"}
         
-        print(f"📧 Scanning email for profile info: {email}")
+        print(f"📧 Scanning email for profile: {email}")
         
-        # Store email address
+        # Store email in collected data
         agent.current_collected_data["email"] = email
         
-        # Attempt email scanning
-        scan_result = _run_async_safely(agent.email_service.scan_email_for_profile(email, agent.current_user_id))
+        # Use the enhanced email service to scan for profile
+        profile_data = agent.email_service.scan_email_for_profile(email, agent.current_user_id)
         
-        if scan_result and scan_result.get("success"):
-            # Store the extracted data
-            extracted_data = scan_result.get("data", {})
-            agent.current_collected_data.update(extracted_data)
-            
-            print(f"✅ Email scan successful: {extracted_data}")
+        print(f"📊 Profile scan results: {profile_data}")
+        
+        # Handle email scanning failure gracefully
+        if not profile_data.get("success"):
+            print(f"📧 Email scanning failed: {profile_data.get('error', 'Unknown error')}")
             return {
-                "success": True,
-                "data": extracted_data,
-                "message": f"Great! I found some information from your email. Let me confirm: {extracted_data}"
-            }
-        else:
-            print(f"❌ Email scan failed: {scan_result}")
-            return {
+                "name": None,
+                "gender": None,
+                "birthdate": None,
+                "city": None,
                 "success": False,
-                "message": "I'll help you fill out your profile manually instead."
+                "error": profile_data.get('error', 'Email scanning not available'),
+                "message": "I couldn't scan your email automatically. Let me ask for your information manually instead."
             }
+        
+        # Update collected data with successful scan results
+        scan_data = profile_data.get("data", {})
+        
+        # Update collected data
+        if scan_data.get("name"):
+            agent.current_collected_data["name"] = scan_data["name"]
+        if scan_data.get("gender"):
+            agent.current_collected_data["gender"] = scan_data["gender"]
+        if scan_data.get("birthdate"):
+            agent.current_collected_data["birthdate"] = scan_data["birthdate"]
+        if scan_data.get("city"):
+            agent.current_collected_data["city"] = scan_data["city"]
+        
+        print(f"✅ Profile updated with scanned data: {agent.current_collected_data}")
+        
+        return {
+            "name": scan_data.get("name"),
+            "gender": scan_data.get("gender"),
+            "birthdate": scan_data.get("birthdate"),
+            "city": scan_data.get("city"),
+            "success": True,
+            "message": "Successfully scanned your email for profile information!"
+        }
         
     except Exception as e:
         print(f"❌ Error in scan_email_for_profile_tool: {str(e)}")
@@ -466,8 +460,6 @@ def skip_group_setup_tool() -> dict:
             agent.current_collected_data["group_code"] = personal_group_code
             agent.current_collected_data["group_role"] = "admin"
             agent.current_collected_data["group_setup_skipped"] = True
-            # FIXED: Mark group invites as declined since user skipped group setup
-            agent.current_collected_data["group_invites_declined"] = True
             print(f"✅ Personal group created with code: {personal_group_code}")
             return {
                 "success": True,
@@ -509,8 +501,7 @@ class OnboardingAgent:
             name="Arny Onboarding Assistant",
             instructions=(
                 "You are Arny AI, a helpful onboarding assistant for a travel planner "
-                "personal assistant app. "
-                "Your task is to obtain personal information from the "
+                "personal assistant app. Your task is to obtain personal information from the "
                 "app user as part of the onboarding process. Follow these steps:\n\n"
                 "IMPORTANT: Continue conversations from where they left off based on collected data.\n\n"
                 "1. GROUP CODE SETUP:\n"
@@ -640,21 +631,25 @@ class OnboardingAgent:
             if not onboarding_complete:
                 current_step_enum = self._determine_current_step(self.current_collected_data)
                 print(f"💾 Saving progress - Current step: {current_step_enum.value}")
+                await self.db.update_onboarding_progress(user_id, current_step_enum, updated_progress)
+            else:
+                # Complete onboarding
+                print("🎉 Completing onboarding...")
+                completion_success = await self.db.complete_onboarding(user_id, self.current_collected_data)
+                print(f"💾 Onboarding completion in database: {completion_success}")
                 
-                progress_save_result = await self.db.save_onboarding_progress(
-                    user_id, current_step_enum, updated_progress
-                )
-                print(f"💾 Progress save result: {progress_save_result}")
+                if not completion_success:
+                    print("⚠️ Database completion failed, but marking as complete anyway")
             
             return {
-                'message': assistant_message,
-                'onboarding_complete': onboarding_complete,
-                'collected_data': self.current_collected_data,
-                'progress_data': updated_progress
+                "message": assistant_message,
+                "onboarding_complete": onboarding_complete,
+                "collected_data": self.current_collected_data,
+                "progress_data": updated_progress
             }
             
         except Exception as e:
-            print(f"❌ Error in process_message: {str(e)}")
+            print(f"❌ Error in onboarding agent: {e}")
             import traceback
             traceback.print_exc()
             return {
@@ -720,16 +715,8 @@ class OnboardingAgent:
             
             # Additional check for group invites (if applicable)
             if is_complete and self.current_collected_data.get("group_role") == "admin":
-                # FIXED: Check if group setup was skipped OR if group invites were handled
-                group_setup_skipped = self.current_collected_data.get("group_setup_skipped", False)
-                group_invites_sent = self.current_collected_data.get("group_invites_sent", False)
-                group_invites_declined = self.current_collected_data.get("group_invites_declined", False)
-                
-                if group_setup_skipped:
-                    print(f"✅ Group setup was skipped - onboarding complete")
-                elif group_invites_sent or group_invites_declined:
-                    print(f"✅ Group invites handled - onboarding complete")
-                else:
+                # For admin users, check if they've been asked about group invites
+                if not self.current_collected_data.get("group_invites_sent") and not self.current_collected_data.get("group_invites_declined"):
                     print(f"⏳ Admin user hasn't completed group invites step yet")
                     is_complete = False
             
@@ -781,12 +768,10 @@ Respond with only "YES" if the message clearly indicates onboarding completion, 
                                 is_complete = response_text == "YES"
                                 if is_complete:
                                     print("🎉 LLM detected onboarding completion!")
-                                else:
-                                    print("🔄 LLM detected onboarding continuation")
                                 
                                 return is_complete
             
-            print("❌ Could not parse LLM completion detection response")
+            print("❌ Could not extract valid response from LLM")
             return False
             
         except Exception as e:
@@ -796,24 +781,23 @@ Respond with only "YES" if the message clearly indicates onboarding completion, 
     def _fallback_phrase_detection(self, message: str) -> bool:
         """Fallback phrase-based completion detection"""
         try:
-            message_lower = message.lower()
-            
             completion_phrases = [
                 "this completes your onboarding",
-                "onboarding is complete",
+                "onboarding is complete", 
                 "welcome to arny ai",
                 "you're now ready to start",
-                "ready to start planning amazing trips",
-                "onboarding complete",
-                "setup is complete"
+                "onboarding process is finished",
+                "you're all set",
+                "ready to start planning",
+                "onboarding has been completed"
             ]
             
+            message_lower = message.lower()
             for phrase in completion_phrases:
                 if phrase in message_lower:
-                    print(f"📝 Phrase detection found completion indicator: '{phrase}'")
+                    print(f"✅ Found completion phrase: '{phrase}'")
                     return True
             
-            print("📝 No completion phrases detected")
             return False
             
         except Exception as e:
@@ -821,7 +805,7 @@ Respond with only "YES" if the message clearly indicates onboarding completion, 
             return False
     
     def _determine_current_step_from_data(self, collected_data: Dict[str, Any]) -> str:
-        """Determine the current step based on collected data (string version for logging)"""
+        """Determine the current onboarding step based on collected data"""
         if not collected_data.get("group_code"):
             return "group_setup"
         elif not collected_data.get("email"):
@@ -837,7 +821,6 @@ Respond with only "YES" if the message clearly indicates onboarding completion, 
         elif not collected_data.get("holiday_preferences"):
             return "holiday_preferences"
         elif (collected_data.get("group_role") == "admin" and 
-              not collected_data.get("group_setup_skipped") and  # FIXED: Check if group setup was skipped
               not collected_data.get("group_invites_sent") and 
               not collected_data.get("group_invites_declined")):
             return "group_invites"
@@ -924,7 +907,6 @@ Respond with only "YES" if the message clearly indicates onboarding completion, 
         elif not collected_data.get("holiday_preferences"):
             return OnboardingStep.HOLIDAY_PREFERENCES
         elif (collected_data.get("group_role") == "admin" and 
-              not collected_data.get("group_setup_skipped") and  # FIXED: Check if group setup was skipped
               not collected_data.get("group_invites_sent") and 
               not collected_data.get("group_invites_declined")):
             return OnboardingStep.GROUP_INVITES
