@@ -36,7 +36,7 @@ class OnboardingStep(str, Enum):
     JOB_DETAILS = "job_details"
     FINANCIAL_INFO = "financial_info"
     HOLIDAY_PREFERENCES = "holiday_preferences"
-    GROUP_SETUP = "group_setup"
+    GROUP_INVITES = "group_invites"
     COMPLETED = "completed"
 
 class UserRole(str, Enum):
@@ -209,7 +209,7 @@ class OnboardingProgress(TimestampMixin):
                 OnboardingStep.JOB_DETAILS: 60.0,
                 OnboardingStep.FINANCIAL_INFO: 80.0,
                 OnboardingStep.HOLIDAY_PREFERENCES: 90.0,
-                OnboardingStep.GROUP_SETUP: 95.0,
+                OnboardingStep.GROUP_INVITES: 95.0,
                 OnboardingStep.COMPLETED: 100.0
             }
             
